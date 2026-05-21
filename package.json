@@ -1,0 +1,45 @@
+{
+  "name": "cloudsecurity",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cloudtrail": "^3.1051.0",
+    "@aws-sdk/client-cloudwatch-logs": "^3.1051.0",
+    "@aws-sdk/client-config-service": "^3.1051.0",
+    "@aws-sdk/client-guardduty": "^3.1051.0",
+    "@aws-sdk/client-iam": "^3.1051.0",
+    "@aws-sdk/client-s3": "^3.1051.0",
+    "@aws-sdk/client-s3-control": "^3.1051.0",
+    "@tanstack/react-virtual": "^3.13.25",
+    "lucide-react": "^0.368.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.30.3",
+    "recharts": "^2.15.4",
+    "zustand": "^4.5.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.12.3",
+    "@types/react": "^18.3.29",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^6.0.1",
+    "autoprefixer": "^10.5.0",
+    "eslint": "^10.3.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "globals": "^17.6.0",
+    "postcss": "^8.5.15",
+    "tailwindcss": "^3.4.19",
+    "typescript": "~6.0.2",
+    "typescript-eslint": "^8.59.2",
+    "vite": "^8.0.12"
+  }
+}

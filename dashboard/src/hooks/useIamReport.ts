@@ -1,9 +1,10 @@
 import { useEffect, useCallback } from 'react';
 import { useSecurityStore } from '../store/securityStore';
-import { isMockMode, iamClient, executeAwsCall } from '../aws-client';
-import { GenerateCredentialReportCommand, GetCredentialReportCommand } from '@aws-sdk/client-iam';
+import { ddbDocClient, lambdaClient, executeAwsCall } from '../aws-client';
+import { ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { InvokeCommand } from '@aws-sdk/client-lambda';
 import type { IamAnomaly } from '../types/iam';
-import { useGuardDuty } from './useGuardDuty';
+import type { Severity } from '../constants/severity';
 
 const MOCK_IAM_ANOMALIES: IamAnomaly[] = [
   {
@@ -109,138 +110,78 @@ const MOCK_IAM_ANOMALIES: IamAnomaly[] = [
 ];
 
 export function useIamReport() {
-  const { setIamAnomalies, scanTriggerCount, setIsLoading } = useSecurityStore();
-  const { fetchGuardDuty } = useGuardDuty();
+  const { setIamAnomalies, scanTriggerCount, setIsLoading, isMockMode } = useSecurityStore();
 
-  const scanIamCompliance = useCallback(async () => {
+  const scanIamCompliance = useCallback(async (triggerLambda = false) => {
     setIsLoading(true);
 
     if (isMockMode) {
       await new Promise(resolve => setTimeout(resolve, 700));
-      
-      // Fetch GuardDuty finding to append if critical
-      const gdFindings = await fetchGuardDuty();
-      const gdCriticals = gdFindings
-        .filter(f => f.severity >= 7.0 && f.resource.resourceType === 'AccessKey')
-        .map(f => ({
-          id: f.id,
-          severity: 'CRITICAL' as const,
-          title: `GuardDuty Critical Alert: ${f.title}`,
-          detail: `${f.resource.accessKeyDetails?.userName || 'AccessKey'} · ${f.description}`,
-          actionText: 'Investigate ↗' as const,
-          pattern: 'guardduty_iam_threat',
-          timestamp: f.createdAt,
-          resourceArn: `arn:aws:iam::123456789012:user/${f.resource.accessKeyDetails?.userName || 'unknown'}`,
-          rawEvent: f.rawJson || JSON.stringify(f, null, 2)
-        }));
-
-      setIamAnomalies([...gdCriticals, ...MOCK_IAM_ANOMALIES]);
+      setIamAnomalies(MOCK_IAM_ANOMALIES);
       setIsLoading(false);
       return;
     }
 
-    // Narrow down global mutable client for TypeScript strict-null narrowing
-    const client = iamClient;
-    if (!client) {
-      setIsLoading(false);
-      return;
+    // Live Mode: Invoke backend iam-detector Lambda first if triggerLambda is true
+    if (triggerLambda) {
+      console.log('Invoking backend iam-detector Lambda function in LocalStack...');
+      await executeAwsCall(() =>
+        lambdaClient.send(new InvokeCommand({
+          FunctionName: 'iam-detector',
+          Payload: new TextEncoder().encode(JSON.stringify({}))
+        }))
+      );
+      // Brief pause for write consistency
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
 
-    // 1. Generate Credential Report
-    const genCommand = new GenerateCredentialReportCommand({});
-    await executeAwsCall(() => client.send(genCommand));
+    // Scan DynamoDB table for IAM compliance alerts
+    const [ddbRes, ddbErr] = await executeAwsCall(() =>
+      ddbDocClient.send(new ScanCommand({ TableName: 'SecurityAlerts' }))
+    );
 
-    // 2. Fetch Credential Report
-    const getCommand = new GetCredentialReportCommand({});
-    const [reportRes, reportErr] = await executeAwsCall(() => client.send(getCommand));
-
-    if (reportErr || !reportRes || !reportRes.Content) {
-      console.error('IAM Credential Report Error:', reportErr);
+    if (ddbErr || !ddbRes || !ddbRes.Items) {
+      console.error('DynamoDB IAM Alerts Scan Error:', ddbErr);
       setIamAnomalies([]);
       setIsLoading(false);
       return;
     }
 
-    // Decode base64 CSV report content
-    const csvContent = new TextDecoder('utf-8').decode(reportRes.Content);
-    const lines = csvContent.split('\n');
-    const headers = lines[0].split(',');
-    
-    // Parse CSV headers
-    const userIndex = headers.indexOf('user');
-    const arnIndex = headers.indexOf('arn');
-    const mfaActiveIndex = headers.indexOf('mfa_active');
-    const key1ActiveIndex = headers.indexOf('access_key_1_active');
-    const key1CreatedIndex = headers.indexOf('access_key_1_last_rotated');
-    const key2ActiveIndex = headers.indexOf('access_key_2_active');
-    const key2CreatedIndex = headers.indexOf('access_key_2_last_rotated');
+    const iamAlerts = ddbRes.Items.filter((item: any) => item.type === 'IAM_MISUSE');
 
-    const anomalies: IamAnomaly[] = [];
-
-    // Skip header, parse users
-    for (let i = 1; i < lines.length; i++) {
-      if (!lines[i]) continue;
-      const row = lines[i].split(',');
-      const userName = row[userIndex];
-      const arn = row[arnIndex];
-      const mfaActive = row[mfaActiveIndex] === 'true';
-      const key1Active = row[key1ActiveIndex] === 'true';
-      const key2Active = row[key2ActiveIndex] === 'true';
-
-      // Check Rule 1: MFA missing for non-root console accessible users
-      if (!mfaActive && userName !== '<root_account>') {
-        anomalies.push({
-          id: `iam-mfa-${userName}`,
-          severity: 'LOW',
-          title: 'Console user lacking multi-factor authentication (MFA)',
-          detail: `${arn} · Virtual/Hardware MFA registration missing`,
-          actionText: 'Review ↗',
-          pattern: 'mfa_missing',
-          timestamp: new Date().toISOString(),
-          resourceArn: arn,
-          rawJson: JSON.stringify({ userName, mfaActive, arn }, null, 2)
-        });
-      }
-
-      // Check Rule 2: Access keys > 90 days active
-      const checkKeyAge = (active: boolean, rotatedStr: string, keyNum: number) => {
-        if (!active || rotatedStr === 'N/A' || !rotatedStr) return;
-        const rotateDate = new Date(rotatedStr);
-        const ageMs = Date.now() - rotateDate.getTime();
-        const ageDays = Math.floor(ageMs / (24 * 3600000));
-
-        if (ageDays > 90) {
-          anomalies.push({
-            id: `iam-key-age-${userName}-key${keyNum}`,
-            severity: 'MEDIUM',
-            title: `Active Access Key ${keyNum} exceeds security lifetime (> 90 days)`,
-            detail: `${userName} · Access Key age is ${ageDays} days (active)`,
-            actionText: 'Rotate ↗',
-            pattern: 'access_key_age',
-            timestamp: new Date().toISOString(),
-            resourceArn: arn,
-            rawJson: JSON.stringify({ userName, keyNum, ageDays, rotateDate }, null, 2)
-          });
-        }
+    const anomalies: IamAnomaly[] = iamAlerts.map((item: any) => {
+      const isCritical = item.severity === 'CRITICAL';
+      return {
+        id: item.alertId || String(Math.random()),
+        severity: (item.severity || 'LOW') as Severity,
+        title: isCritical 
+          ? 'Privilege Escalation: Direct AdministratorAccess Attachment' 
+          : 'Console User Lacking Multi-Factor Authentication (MFA)',
+        detail: item.detail || `Direct compliance violation on IAM user "${item.resource}"`,
+        actionText: isCritical ? 'Remediate ↗' : 'Review ↗',
+        pattern: isCritical ? 'admin_policy_exposed' : 'mfa_missing',
+        timestamp: item.timestamp || new Date().toISOString(),
+        resourceArn: `arn:aws:iam::000000000000:user/${item.resource}`,
+        rawJson: JSON.stringify(item, null, 2),
+        rawEvent: JSON.stringify(item, null, 2)
       };
-
-      checkKeyAge(key1Active, row[key1CreatedIndex], 1);
-      checkKeyAge(key2Active, row[key2CreatedIndex], 2);
-    }
+    });
 
     setIamAnomalies(anomalies);
     setIsLoading(false);
-  }, [setIamAnomalies, fetchGuardDuty, scanTriggerCount, setIsLoading]);
+  }, [setIamAnomalies, setIsLoading, isMockMode]);
 
+  // Scan on mount
   useEffect(() => {
-    scanIamCompliance();
-  }, []);
+    scanIamCompliance(false);
+  }, [isMockMode]);
 
+  // Explicit scan trigger (Run Scan clicked)
   useEffect(() => {
     if (scanTriggerCount > 0) {
-      scanIamCompliance();
+      scanIamCompliance(true);
     }
-  }, [scanTriggerCount, scanIamCompliance]);
+  }, [scanTriggerCount]);
 
-  return { refresh: scanIamCompliance };
+  return { refresh: () => scanIamCompliance(false) };
 }

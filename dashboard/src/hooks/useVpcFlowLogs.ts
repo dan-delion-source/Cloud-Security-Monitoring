@@ -1,9 +1,10 @@
 import { useEffect, useCallback } from 'react';
 import { useSecurityStore } from '../store/securityStore';
+import { ddbDocClient, lambdaClient, executeAwsCall } from '../aws-client';
+import { ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { InvokeCommand } from '@aws-sdk/client-lambda';
 import type { UnauthorizedEvent } from '../store/securityStore';
-import { isMockMode, cloudWatchLogsClient, executeAwsCall } from '../aws-client';
-import { StartQueryCommand, GetQueryResultsCommand } from '@aws-sdk/client-cloudwatch-logs';
-import { isPrivateIp } from '../utils/ipUtils';
+import type { Severity } from '../constants/severity';
 
 const MOCK_UNAUTHORIZED_EVENTS: UnauthorizedEvent[] = [
   {
@@ -93,7 +94,7 @@ const MOCK_UNAUTHORIZED_EVENTS: UnauthorizedEvent[] = [
       eventSource: 'secretsmanager.amazonaws.com',
       eventName: 'GetSecretValue',
       awsRegion: 'us-east-1',
-      vpcEndpointId: null, // Critical flag - VPC endpoint is missing!
+      vpcEndpointId: null,
       sourceIPAddress: '172.31.42.115',
       userIdentity: {
         type: 'AssumedRole',
@@ -108,127 +109,85 @@ const MOCK_UNAUTHORIZED_EVENTS: UnauthorizedEvent[] = [
 ];
 
 export function useVpcFlowLogs() {
-  const { setUnauthorizedEvents, scanTriggerCount, setIsLoading } = useSecurityStore();
+  const { setUnauthorizedEvents, scanTriggerCount, setIsLoading, isMockMode } = useSecurityStore();
 
-  const fetchUnauthEvents = useCallback(async () => {
+  const fetchUnauthEvents = useCallback(async (triggerLambda = false) => {
     setIsLoading(true);
 
     if (isMockMode) {
       await new Promise(resolve => setTimeout(resolve, 600));
-      
-      // Filter out any private IPs or evaluate rules to double-check
-      const validatedEvents = MOCK_UNAUTHORIZED_EVENTS.map(evt => {
-        // Re-evaluate client side logic for demonstration / validation
-        if (evt.routeType === 'Public IP' && isPrivateIp(evt.sourceIP)) {
-          // If mock IP changed to private, it wouldn't be unauthorized
-          evt.severity = 'LOW';
-        }
-        return evt;
-      });
-      
-      setUnauthorizedEvents(validatedEvents);
+      setUnauthorizedEvents(MOCK_UNAUTHORIZED_EVENTS);
       setIsLoading(false);
       return;
     }
 
-    // Live Mode using @aws-sdk/client-cloudwatch-logs Insights Query
-    const client = cloudWatchLogsClient;
-    if (!client) {
-      setIsLoading(false);
-      return;
-    }
-
-    // Query 1: S3 Server Access Logs / CloudTrail API calls
-    // Query 2: VPC Flow Logs with action REJECT
-    const query = `
-      fields @timestamp, srcAddr, dstAddr, action, interfaceId
-      | filter action = "REJECT"
-      | sort @timestamp desc
-      | limit 10
-    `;
-
-    const startCommand = new StartQueryCommand({
-      logGroupName: '/aws/vpc/flowlogs',
-      queryString: query,
-      startTime: Math.floor((Date.now() - 24 * 3600000) / 1000), // last 24h
-      endTime: Math.floor(Date.now() / 1000),
-    });
-
-    const [startRes, startErr] = await executeAwsCall(() => client.send(startCommand));
-
-    if (startErr || !startRes || !startRes.queryId) {
-      console.warn('VPC Flow Log query failed to start, falling back to empty feed');
-      setUnauthorizedEvents([]);
-      setIsLoading(false);
-      return;
-    }
-
-    // Poll for query results (maximum 5 attempts)
-    const queryId = startRes.queryId;
-    let queryResults: any = null;
-    let attempts = 0;
-    
-    while (attempts < 5) {
+    // Live Mode: Invoke detectors if triggerLambda is true
+    if (triggerLambda) {
+      console.log('Invoking backend unauth-detector and suspicious-login Lambdas in LocalStack...');
+      await Promise.all([
+        executeAwsCall(() =>
+          lambdaClient.send(new InvokeCommand({
+            FunctionName: 'unauth-detector',
+            Payload: new TextEncoder().encode(JSON.stringify({}))
+          }))
+        ),
+        executeAwsCall(() =>
+          lambdaClient.send(new InvokeCommand({
+            FunctionName: 'suspicious-login',
+            Payload: new TextEncoder().encode(JSON.stringify({}))
+          }))
+        )
+      ]);
+      // Brief pause for write consistency
       await new Promise(resolve => setTimeout(resolve, 1000));
-      const getCommand = new GetQueryResultsCommand({ queryId });
-      const [res, err] = await executeAwsCall(() => client.send(getCommand));
-      
-      if (!err && res && res.status === 'Complete') {
-        queryResults = res.results;
-        break;
-      }
-      attempts++;
     }
 
-    if (!queryResults) {
+    // Scan DynamoDB table for unauthorized/login alert types
+    const [ddbRes, ddbErr] = await executeAwsCall(() =>
+      ddbDocClient.send(new ScanCommand({ TableName: 'SecurityAlerts' }))
+    );
+
+    if (ddbErr || !ddbRes || !ddbRes.Items) {
+      console.error('DynamoDB Unauth/Login Alerts Scan Error:', ddbErr);
       setUnauthorizedEvents([]);
       setIsLoading(false);
       return;
     }
 
-    const parsedEvents: UnauthorizedEvent[] = queryResults.map((row: any[], index: number) => {
-      const getVal = (field: string) => row.find(f => f.field === field)?.value || '';
-      const timestamp = getVal('@timestamp');
-      const srcAddr = getVal('srcAddr');
-      const dstAddr = getVal('dstAddr');
-      const interfaceId = getVal('interfaceId');
+    const netAlerts = ddbRes.Items.filter(
+      (item: any) => item.type === 'UNAUTHORIZED_ACCESS' || item.type === 'SUSPICIOUS_LOGIN'
+    );
 
-      // VPC REJECT is high severity in network monitoring
-      const severity = 'HIGH';
-
+    const parsedEvents: UnauthorizedEvent[] = netAlerts.map((item: any) => {
+      const isLogin = item.type === 'SUSPICIOUS_LOGIN';
       return {
-        id: `flow-${index}-${timestamp}`,
-        severity,
-        description: `VPC Network flow REJECT on ENI ${interfaceId}`,
-        source: `${srcAddr} (External)`,
-        destination: `${dstAddr} (${interfaceId})`,
-        timestamp: new Date(timestamp).toISOString(),
-        routeType: 'Public IP',
-        sourceIP: srcAddr,
-        rawJson: JSON.stringify({
-          message: 'VPC Flow Log record REJECT action detected',
-          timestamp,
-          sourceAddress: srcAddr,
-          destinationAddress: dstAddr,
-          networkInterface: interfaceId,
-          action: 'REJECT'
-        }, null, 2)
+        id: item.alertId || String(Math.random()),
+        severity: (item.severity || 'HIGH') as Severity,
+        description: item.detail || `Boundary breach alert of type "${item.type}"`,
+        source: item.resource || 'unknown-origin',
+        destination: isLogin ? 'AWS Console Sign-in' : 'Application Boundary Gateway',
+        timestamp: item.timestamp || new Date().toISOString(),
+        routeType: isLogin ? 'CF bypass' : 'Public IP',
+        sourceIP: item.resource || '127.0.0.1',
+        rawJson: JSON.stringify(item, null, 2)
       };
     });
 
     setUnauthorizedEvents(parsedEvents);
     setIsLoading(false);
-  }, [setUnauthorizedEvents, setIsLoading]);
+  }, [setUnauthorizedEvents, setIsLoading, isMockMode]);
 
+  // Initial load
   useEffect(() => {
-    fetchUnauthEvents();
-  }, []);
+    fetchUnauthEvents(false);
+  }, [isMockMode]);
 
+  // Explicit scan trigger (Run Scan clicked)
   useEffect(() => {
     if (scanTriggerCount > 0) {
-      fetchUnauthEvents();
+      fetchUnauthEvents(true);
     }
-  }, [scanTriggerCount, fetchUnauthEvents]);
+  }, [scanTriggerCount]);
 
-  return { refresh: fetchUnauthEvents };
+  return { refresh: () => fetchUnauthEvents(false) };
 }

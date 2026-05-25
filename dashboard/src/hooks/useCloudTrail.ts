@@ -1,9 +1,10 @@
 import { useEffect, useCallback } from 'react';
 import { useSecurityStore } from '../store/securityStore';
-import { isMockMode, cloudTrailClient, executeAwsCall } from '../aws-client';
-import { LookupEventsCommand } from '@aws-sdk/client-cloudtrail';
-import type { ParsedLog, CloudTrailRawEvent } from '../types/cloudtrail';
+import { ddbDocClient, executeAwsCall } from '../aws-client';
+import { ScanCommand } from '@aws-sdk/lib-dynamodb';
+import type { ParsedLog } from '../types/cloudtrail';
 import { evaluateLogSeverity } from '../utils/severity';
+import type { Severity } from '../constants/severity';
 
 const MOCK_EVENTS = [
   {
@@ -107,7 +108,7 @@ const MOCK_EVENTS = [
 ];
 
 export function useCloudTrail() {
-  const { prependLogs, setLogs, scanTriggerCount, setIsLoading } = useSecurityStore();
+  const { prependLogs, setLogs, scanTriggerCount, setIsLoading, isMockMode, setActiveAlerts } = useSecurityStore();
 
   const fetchCloudTrail = useCallback(async (isInitial = false) => {
     setIsLoading(true);
@@ -174,62 +175,48 @@ export function useCloudTrail() {
       return;
     }
 
-    // Live Mode using @aws-sdk/client-cloudtrail
-    const client = cloudTrailClient;
-    if (!client) {
+    // Live Mode: Scan SecurityAlerts DynamoDB Table
+    const [response, error] = await executeAwsCall(() => 
+      ddbDocClient.send(new ScanCommand({ TableName: 'SecurityAlerts' }))
+    );
+
+    if (error || !response || !response.Items) {
+      console.error('DynamoDB Alerts Scan Error:', error);
+      setLogs([]);
       setIsLoading(false);
       return;
     }
 
-    const command = new LookupEventsCommand({
-      MaxResults: 50,
-    });
-
-    const [response, error] = await executeAwsCall(() => client.send(command));
-
-    if (error || !response || !response.Events) {
-      console.error('CloudTrail SDK Error:', error);
-      setIsLoading(false);
-      return;
-    }
-
-    const parsedLogs: ParsedLog[] = response.Events.map((evt) => {
-      let rawEvent: CloudTrailRawEvent;
-      try {
-        rawEvent = JSON.parse(evt.CloudTrailEvent || '{}');
-      } catch {
-        rawEvent = {
-          userIdentity: { type: 'Unknown' },
-          eventTime: evt.EventTime?.toISOString() || new Date().toISOString(),
-          eventSource: evt.EventSource || 'unknown',
-          eventName: evt.EventName || 'unknown',
-          awsRegion: 'us-east-1',
-          sourceIPAddress: '0.0.0.0',
-          eventID: evt.EventId || String(Math.random())
-        };
+    // Map DynamoDB SecurityAlerts items to ParsedLog
+    const parsedLogs: ParsedLog[] = response.Items.map((item: any) => {
+      let eventSource = 'signin';
+      if (item.type === 'PUBLIC_S3_BUCKET') {
+        eventSource = 's3';
+      } else if (item.type === 'IAM_MISUSE') {
+        eventSource = 'iam';
       }
-
-      const arn = evt.Username ? `arn:aws:iam::123456789012:user/${evt.Username}` : 'arn:aws:iam::123456789012:root';
-
+      
+      const principalArn = item.type === 'IAM_MISUSE' 
+        ? `arn:aws:iam::000000000000:user/${item.resource}` 
+        : 'arn:aws:iam::000000000000:root';
+        
       return {
-        id: evt.EventId || String(Math.random()),
-        timestamp: evt.EventTime?.toISOString() || new Date().toISOString(),
-        eventName: evt.EventName || 'UnknownEvent',
-        eventSource: evt.EventSource ? evt.EventSource.split('.')[0] : 'unknown',
-        principalArn: arn,
-        sourceIP: rawEvent.sourceIPAddress || '0.0.0.0',
-        severity: evaluateLogSeverity(
-          evt.EventName || '',
-          rawEvent.userIdentity || null,
-          evt.EventSource || '',
-          rawEvent.requestParameters
-        ),
-        rawJson: evt.CloudTrailEvent || JSON.stringify(evt, null, 2),
-        awsRegion: rawEvent.awsRegion || 'us-east-1',
+        id: item.alertId || String(Math.random()),
+        timestamp: item.timestamp || new Date().toISOString(),
+        eventName: item.type,
+        eventSource,
+        principalArn,
+        sourceIP: item.type === 'SUSPICIOUS_LOGIN' || item.type === 'UNAUTHORIZED_ACCESS' ? item.resource : '127.0.0.1',
+        severity: (item.severity || 'LOW') as Severity,
+        rawJson: JSON.stringify(item, null, 2),
+        awsRegion: 'us-east-1',
       };
     });
 
     parsedLogs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+    // Reset active alerts dynamically so Overview rebuilds them
+    setActiveAlerts([]);
 
     if (isInitial) {
       setLogs(parsedLogs);
@@ -238,12 +225,12 @@ export function useCloudTrail() {
     }
     
     setIsLoading(false);
-  }, [prependLogs, setLogs, setIsLoading]);
+  }, [prependLogs, setLogs, setIsLoading, isMockMode, setActiveAlerts]);
 
   // Initial load
   useEffect(() => {
     fetchCloudTrail(true);
-  }, []);
+  }, [isMockMode]);
 
   // Scan triggers
   useEffect(() => {
@@ -252,11 +239,11 @@ export function useCloudTrail() {
     }
   }, [scanTriggerCount, fetchCloudTrail]);
 
-  // Live polling every 60 seconds
+  // Live polling every 30 seconds (faster for local demo)
   useEffect(() => {
     const interval = setInterval(() => {
       fetchCloudTrail(false);
-    }, 60000);
+    }, 30000);
 
     return () => clearInterval(interval);
   }, [fetchCloudTrail]);

@@ -164,10 +164,16 @@ export const useSecurityStore = create<SecurityState>((set) => ({
   updateAwsConfig: (awsConfig) => set({ awsConfig }),
   toggleMockMode: () => set((state) => ({ isMockMode: !state.isMockMode })),
   
-  triggerScan: () => set((state) => ({ 
-    scanTriggerCount: state.scanTriggerCount + 1,
-    isScanning: true 
-  })),
+  triggerScan: () => set((state) => {
+    // Self-healing timeout: automatically reset isScanning state to false after 2 seconds
+    setTimeout(() => {
+      set({ isScanning: false });
+    }, 2000);
+    return { 
+      scanTriggerCount: state.scanTriggerCount + 1,
+      isScanning: true 
+    };
+  }),
   
   resetStore: () => set({
     logs: [],

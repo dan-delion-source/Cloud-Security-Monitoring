@@ -1,7 +1,8 @@
 import { useCallback } from 'react';
-import { isMockMode, guardDutyClient, executeAwsCall } from '../aws-client';
+import { guardDutyClient, executeAwsCall } from '../aws-client';
 import { ListFindingsCommand, GetFindingsCommand } from '@aws-sdk/client-guardduty';
 import type { GuardDutyFinding } from '../types/guardduty';
+import { useSecurityStore } from '../store/securityStore';
 
 const MOCK_GUARDDUTY_FINDINGS: GuardDutyFinding[] = [
   {
@@ -42,6 +43,7 @@ const MOCK_GUARDDUTY_FINDINGS: GuardDutyFinding[] = [
 ];
 
 export function useGuardDuty() {
+  const { isMockMode } = useSecurityStore();
   const fetchGuardDuty = useCallback(async () => {
     if (isMockMode) {
       return MOCK_GUARDDUTY_FINDINGS;

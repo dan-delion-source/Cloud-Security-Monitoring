@@ -5,38 +5,44 @@ import { ConfigServiceClient } from '@aws-sdk/client-config-service';
 import { S3Client } from '@aws-sdk/client-s3';
 import { S3ControlClient } from '@aws-sdk/client-s3-control';
 import { IAMClient } from '@aws-sdk/client-iam';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { LambdaClient } from '@aws-sdk/client-lambda';
 
 // Environment variables configuration
-const accessKeyId = import.meta.env.VITE_AWS_ACCESS_KEY_ID || '';
-const secretAccessKey = import.meta.env.VITE_AWS_SECRET_ACCESS_KEY || '';
+const accessKeyId = import.meta.env.VITE_AWS_ACCESS_KEY_ID || 'test';
+const secretAccessKey = import.meta.env.VITE_AWS_SECRET_ACCESS_KEY || 'test';
 const sessionToken = import.meta.env.VITE_AWS_SESSION_TOKEN || undefined;
 const region = import.meta.env.VITE_AWS_REGION || 'us-east-1';
 
-const awsCredentials = accessKeyId && secretAccessKey ? {
+const awsCredentials = {
   accessKeyId,
   secretAccessKey,
   sessionToken
-} : undefined;
-
-export const isMockMode = import.meta.env.VITE_USE_MOCK_DATA === 'true' || !awsCredentials;
-
-// AWS SDK Clients Initialization
-const clientConfig = {
-  region,
-  ...(awsCredentials ? { credentials: awsCredentials } : {})
 };
 
-export const cloudTrailClient = !isMockMode ? new CloudTrailClient(clientConfig) : null;
-export const cloudWatchLogsClient = !isMockMode ? new CloudWatchLogsClient(clientConfig) : null;
-export const guardDutyClient = !isMockMode ? new GuardDutyClient(clientConfig) : null;
-export const configServiceClient = !isMockMode ? new ConfigServiceClient(clientConfig) : null;
-export const s3Client = !isMockMode ? new S3Client(clientConfig) : null;
-export const s3ControlClient = !isMockMode ? new S3ControlClient(clientConfig) : null;
-export const iamClient = !isMockMode ? new IAMClient(clientConfig) : null;
+// AWS SDK Clients Initialization pointing to LocalStack (localhost:4566)
+const clientConfig = {
+  region,
+  endpoint: 'http://localhost:4566',
+  credentials: awsCredentials,
+  forcePathStyle: true // Safe for local S3
+};
+
+export const cloudTrailClient = new CloudTrailClient(clientConfig);
+export const cloudWatchLogsClient = new CloudWatchLogsClient(clientConfig);
+export const guardDutyClient = new GuardDutyClient(clientConfig);
+export const configServiceClient = new ConfigServiceClient(clientConfig);
+export const s3Client = new S3Client(clientConfig);
+export const s3ControlClient = new S3ControlClient(clientConfig);
+export const iamClient = new IAMClient(clientConfig);
+export const dynamoDbClient = new DynamoDBClient(clientConfig);
+export const ddbDocClient = DynamoDBDocumentClient.from(dynamoDbClient);
+export const lambdaClient = new LambdaClient(clientConfig);
 
 /**
  * Executes a function calling the AWS SDK.
- * Handles credential injection, retry with exponential backoff (max 3 attempts),
+ * Handles retry with exponential backoff (max 3 attempts),
  * and error normalization using the tuple pattern.
  */
 export async function executeAwsCall<T>(

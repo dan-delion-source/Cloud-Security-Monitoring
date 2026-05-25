@@ -1,8 +1,9 @@
 import { useEffect, useCallback } from 'react';
 import { useSecurityStore } from '../store/securityStore';
-import { isMockMode, s3Client, configServiceClient, executeAwsCall } from '../aws-client';
-import { ListDiscoveredResourcesCommand } from '@aws-sdk/client-config-service';
-import { GetBucketAclCommand, GetBucketPolicyCommand, GetBucketEncryptionCommand, GetBucketVersioningCommand, GetBucketWebsiteCommand } from '@aws-sdk/client-s3';
+import { ddbDocClient, s3Client, lambdaClient, executeAwsCall } from '../aws-client';
+import { ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { ListBucketsCommand, GetBucketEncryptionCommand, GetBucketVersioningCommand, GetBucketWebsiteCommand } from '@aws-sdk/client-s3';
+import { InvokeCommand } from '@aws-sdk/client-lambda';
 import type { S3BucketScanResult, S3BucketChecks } from '../types/s3';
 import type { Severity } from '../constants/severity';
 
@@ -16,13 +17,13 @@ const MOCK_BUCKETS: S3BucketScanResult[] = [
     encryptionType: 'SSE-S3',
     remediated: false,
     checks: {
-      blockPublicAcls: false,      // fails (CRITICAL)
-      blockPublicPolicy: false,    // fails (CRITICAL)
-      noPublicPolicyPrincipal: false, // policy contains Principal: "*" (CRITICAL)
+      blockPublicAcls: false,
+      blockPublicPolicy: false,
+      noPublicPolicyPrincipal: false,
       noPublicAcl: true,
       websiteDisabled: true,
-      sseKmsEnabled: false,        // SSE-S3 only (MEDIUM)
-      versioningEnabled: false     // disabled (LOW)
+      sseKmsEnabled: false,
+      versioningEnabled: false
     }
   },
   {
@@ -37,8 +38,8 @@ const MOCK_BUCKETS: S3BucketScanResult[] = [
       blockPublicAcls: true,
       blockPublicPolicy: true,
       noPublicPolicyPrincipal: true,
-      noPublicAcl: false,          // PublicReadAcl set via ACL (HIGH)
-      websiteDisabled: false,      // website endpoint enabled (HIGH flag for review)
+      noPublicAcl: false,
+      websiteDisabled: false,
       sseKmsEnabled: false,
       versioningEnabled: true
     }
@@ -49,7 +50,7 @@ const MOCK_BUCKETS: S3BucketScanResult[] = [
     severity: 'MEDIUM',
     exposureDuration: '0 days',
     region: 'us-west-2',
-    encryptionType: 'SSE-S3',      // SSE-S3 only, not SSE-KMS (MEDIUM)
+    encryptionType: 'SSE-S3',
     remediated: false,
     checks: {
       blockPublicAcls: true,
@@ -76,7 +77,7 @@ const MOCK_BUCKETS: S3BucketScanResult[] = [
       noPublicAcl: true,
       websiteDisabled: true,
       sseKmsEnabled: true,
-      versioningEnabled: false     // disabled (LOW)
+      versioningEnabled: false
     }
   },
   {
@@ -100,15 +101,14 @@ const MOCK_BUCKETS: S3BucketScanResult[] = [
 ];
 
 export function useS3Scanner() {
-  const { setBuckets, scanTriggerCount, setIsLoading, buckets } = useSecurityStore();
+  const { setBuckets, scanTriggerCount, setIsLoading, buckets, isMockMode } = useSecurityStore();
 
-  const scanS3Buckets = useCallback(async () => {
+  const scanS3Buckets = useCallback(async (triggerLambda = false) => {
     setIsLoading(true);
 
     if (isMockMode) {
       await new Promise(resolve => setTimeout(resolve, 800));
       
-      // Preserve remediated buckets when scanner refreshes!
       const remediatedIds = new Set(
         buckets.filter(b => b.remediated).map(b => b.id)
       );
@@ -139,23 +139,37 @@ export function useS3Scanner() {
       return;
     }
 
-    // Live Mode using SDK
-    const configClient = configServiceClient;
-    const s3 = s3Client;
-    if (!configClient || !s3) {
-      setIsLoading(false);
-      return;
+    // Live Mode: Invoke s3-scanner Lambda first if triggerLambda is true
+    if (triggerLambda) {
+      console.log('Invoking backend s3-scanner Lambda function in LocalStack...');
+      await executeAwsCall(() => 
+        lambdaClient.send(new InvokeCommand({
+          FunctionName: 's3-scanner',
+          Payload: new TextEncoder().encode(JSON.stringify({}))
+        }))
+      );
+      // Brief pause for write consistency
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
 
-    // 1. Fetch S3 Buckets from AWS Config
-    const listCommand = new ListDiscoveredResourcesCommand({
-      resourceType: 'AWS::S3::Bucket',
-    });
+    // 1. Fetch S3 alerts from DynamoDB SecurityAlerts table
+    const [ddbRes] = await executeAwsCall(() =>
+      ddbDocClient.send(new ScanCommand({ TableName: 'SecurityAlerts' }))
+    );
 
-    const [listRes, listErr] = await executeAwsCall(() => configClient.send(listCommand));
+    const s3Alerts = ddbRes?.Items?.filter((item: any) => item.type === 'PUBLIC_S3_BUCKET') || [];
+    const alertMap = new Map<string, any>();
+    for (const alert of s3Alerts) {
+      alertMap.set(alert.resource, alert);
+    }
 
-    if (listErr || !listRes || !listRes.resourceIdentifiers) {
-      console.error('S3 AWS Config error:', listErr);
+    // 2. Fetch live S3 buckets directly
+    const [listRes, listErr] = await executeAwsCall(() =>
+      s3Client.send(new ListBucketsCommand({}))
+    );
+
+    if (listErr || !listRes || !listRes.Buckets) {
+      console.error('S3 ListBuckets error:', listErr);
       setBuckets([]);
       setIsLoading(false);
       return;
@@ -163,56 +177,29 @@ export function useS3Scanner() {
 
     const scanResults: S3BucketScanResult[] = [];
 
-    // 2. Scan each S3 bucket in parallel
+    // 3. Scan each bucket configuration
     await Promise.all(
-      listRes.resourceIdentifiers.map(async (bucketIdent) => {
-        const bucketName = bucketIdent.resourceName;
+      listRes.Buckets.map(async (bucket) => {
+        const bucketName = bucket.Name;
         if (!bucketName) return;
 
         // Perform sub-queries
-        const aclCall = () => s3.send(new GetBucketAclCommand({ Bucket: bucketName }));
-        const policyCall = () => s3.send(new GetBucketPolicyCommand({ Bucket: bucketName }));
-        const encCall = () => s3.send(new GetBucketEncryptionCommand({ Bucket: bucketName }));
-        const verCall = () => s3.send(new GetBucketVersioningCommand({ Bucket: bucketName }));
-        const webCall = () => s3.send(new GetBucketWebsiteCommand({ Bucket: bucketName }));
+        const encCall = () => s3Client.send(new GetBucketEncryptionCommand({ Bucket: bucketName }));
+        const verCall = () => s3Client.send(new GetBucketVersioningCommand({ Bucket: bucketName }));
+        const webCall = () => s3Client.send(new GetBucketWebsiteCommand({ Bucket: bucketName }));
 
-        const [aclRes] = await executeAwsCall(aclCall);
-        const [policyRes] = await executeAwsCall(policyCall);
         const [encRes] = await executeAwsCall(encCall);
         const [verRes] = await executeAwsCall(verCall);
         const [webRes] = await executeAwsCall(webCall);
 
-        // Core Checks Logic
-        const blockPublicAcls = true; // S3Control API could check this, assume true/false based on policy presence
-        const blockPublicPolicy = true;
+        // Check if there is an active DynamoDB public bucket alert
+        const ddbAlert = alertMap.get(bucketName);
+        const isExposed = !!ddbAlert;
 
-        let noPublicPolicyPrincipal = true;
-        if (policyRes && policyRes.Policy) {
-          try {
-            const policyJson = JSON.parse(policyRes.Policy);
-            const statements = Array.isArray(policyJson.Statement) ? policyJson.Statement : [policyJson.Statement];
-            for (const stmt of statements) {
-              if (stmt.Effect === 'Allow' && stmt.Principal === '*') {
-                noPublicPolicyPrincipal = false;
-                break;
-              }
-            }
-          } catch {
-            noPublicPolicyPrincipal = !policyRes.Policy.includes('"Principal":"*"') && !policyRes.Policy.includes('"Principal" : "*"');
-          }
-        }
-
-        let noPublicAcl = true;
-        if (aclRes && aclRes.Grants) {
-          const publicGrants = aclRes.Grants.filter(grant => 
-            grant.Grantee?.URI === 'http://acs.amazonaws.com/groups/global/AllUsers' || 
-            grant.Grantee?.URI === 'http://acs.amazonaws.com/groups/global/AuthenticatedUsers'
-          );
-          if (publicGrants.length > 0) {
-            noPublicAcl = false;
-          }
-        }
-
+        const blockPublicAcls = !isExposed;
+        const blockPublicPolicy = !isExposed;
+        const noPublicPolicyPrincipal = !isExposed;
+        const noPublicAcl = !isExposed;
         const websiteDisabled = !webRes;
 
         let encryptionType: 'SSE-KMS' | 'SSE-S3' | 'NONE' = 'NONE';
@@ -232,10 +219,8 @@ export function useS3Scanner() {
 
         // Evaluate overall Severity
         let severity: Severity = 'LOW';
-        if (!blockPublicAcls || !blockPublicPolicy || !noPublicPolicyPrincipal) {
-          severity = 'CRITICAL';
-        } else if (!noPublicAcl || !websiteDisabled) {
-          severity = 'HIGH';
+        if (isExposed) {
+          severity = (ddbAlert.severity || 'HIGH') as Severity;
         } else if (encryptionType === 'SSE-S3') {
           severity = 'MEDIUM';
         } else if (!versioningEnabled) {
@@ -253,42 +238,33 @@ export function useS3Scanner() {
         };
 
         scanResults.push({
-          id: bucketIdent.resourceId || String(Math.random()),
+          id: bucketName,
           name: bucketName,
           severity,
           checks,
-          exposureDuration: !noPublicPolicyPrincipal || !noPublicAcl ? '5 days' : '0 days',
-          region: 'us-east-1', // Default region since S3 is global/Config ResourceIdentifier lacks it
+          exposureDuration: isExposed ? '5 days' : '0 days',
+          region: 'us-east-1',
           encryptionType,
-          remediated: false
+          remediated: !isExposed && sseKmsEnabled && versioningEnabled
         });
       })
     );
 
     setBuckets(scanResults);
     setIsLoading(false);
-  }, [setBuckets, setIsLoading, buckets]);
+  }, [setBuckets, setIsLoading, buckets, isMockMode]);
 
   // Scan on mount
   useEffect(() => {
-    scanS3Buckets();
-  }, []);
+    scanS3Buckets(false);
+  }, [isMockMode]);
 
-  // Interval execution every 15 minutes
-  useEffect(() => {
-    const interval = setInterval(() => {
-      scanS3Buckets();
-    }, 15 * 60 * 1000); // 15 minutes
-
-    return () => clearInterval(interval);
-  }, [scanS3Buckets]);
-
-  // Explicit scan trigger
+  // Explicit scan trigger (Run Scan clicked)
   useEffect(() => {
     if (scanTriggerCount > 0) {
-      scanS3Buckets();
+      scanS3Buckets(true);
     }
-  }, [scanTriggerCount, scanS3Buckets]);
+  }, [scanTriggerCount]);
 
-  return { refresh: scanS3Buckets };
+  return { refresh: () => scanS3Buckets(false) };
 }

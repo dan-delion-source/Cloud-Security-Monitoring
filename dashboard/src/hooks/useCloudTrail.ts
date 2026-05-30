@@ -1,10 +1,9 @@
 import { useEffect, useCallback } from 'react';
 import { useSecurityStore } from '../store/securityStore';
-import { ddbDocClient, executeAwsCall } from '../aws-client';
-import { ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { s3Client, executeAwsCall } from '../aws-client';
+import { ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
 import type { ParsedLog } from '../types/cloudtrail';
 import { evaluateLogSeverity } from '../utils/severity';
-import type { Severity } from '../constants/severity';
 
 const MOCK_EVENTS = [
   {
@@ -175,41 +174,59 @@ export function useCloudTrail() {
       return;
     }
 
-    // Live Mode: Scan SecurityAlerts DynamoDB Table
-    const [response, error] = await executeAwsCall(() => 
-      ddbDocClient.send(new ScanCommand({ TableName: 'SecurityAlerts' }))
+    // Live Mode: Fetch from S3 cloudtrail-logs bucket
+    const [listRes, listErr] = await executeAwsCall(() =>
+      s3Client.send(new ListObjectsV2Command({ Bucket: 'cloudtrail-logs' }))
     );
 
-    if (error || !response || !response.Items) {
-      console.error('DynamoDB Alerts Scan Error:', error);
+    if (listErr || !listRes || !listRes.Contents) {
+      console.warn('S3 CloudTrail list warning/empty:', listErr);
       setLogs([]);
       setIsLoading(false);
       return;
     }
 
-    // Map DynamoDB SecurityAlerts items to ParsedLog
-    const parsedLogs: ParsedLog[] = response.Items.map((item: any) => {
-      let eventSource = 'signin';
-      if (item.type === 'PUBLIC_S3_BUCKET') {
-        eventSource = 's3';
-      } else if (item.type === 'IAM_MISUSE') {
-        eventSource = 'iam';
-      }
+    // List and fetch all logs
+    const allRecords: any[] = [];
+    await Promise.all(
+      listRes.Contents.map(async (obj) => {
+        if (!obj.Key) return;
+        const [getRes, getErr] = await executeAwsCall(() =>
+          s3Client.send(new GetObjectCommand({ Bucket: 'cloudtrail-logs', Key: obj.Key }))
+        );
+        if (getErr || !getRes || !getRes.Body) return;
+        try {
+          const bodyStr = await getRes.Body.transformToString('utf-8');
+          const data = JSON.parse(bodyStr);
+          if (data.Records) {
+            allRecords.push(...data.Records);
+          }
+        } catch (e) {
+          console.error('Error parsing S3 CloudTrail log:', e);
+        }
+      })
+    );
+
+    // Map S3 records to ParsedLog
+    const parsedLogs: ParsedLog[] = allRecords.map((event: any) => {
+      const userId = event.userIdentity || {};
+      const arn = userId.arn || `arn:aws:iam::000000000000:${userId.type === 'Root' ? 'root' : userId.userName || 'unknown'}`;
       
-      const principalArn = item.type === 'IAM_MISUSE' 
-        ? `arn:aws:iam::000000000000:user/${item.resource}` 
-        : 'arn:aws:iam::000000000000:root';
-        
       return {
-        id: item.alertId || String(Math.random()),
-        timestamp: item.timestamp || new Date().toISOString(),
-        eventName: item.type,
-        eventSource,
-        principalArn,
-        sourceIP: item.type === 'SUSPICIOUS_LOGIN' || item.type === 'UNAUTHORIZED_ACCESS' ? item.resource : '127.0.0.1',
-        severity: (item.severity || 'LOW') as Severity,
-        rawJson: JSON.stringify(item, null, 2),
-        awsRegion: 'us-east-1',
+        id: event.eventID || String(Math.random()),
+        timestamp: event.eventTime || new Date().toISOString(),
+        eventName: event.eventName,
+        eventSource: event.eventSource ? event.eventSource.split('.')[0] : 'unknown',
+        principalArn: arn,
+        sourceIP: event.sourceIPAddress || '127.0.0.1',
+        severity: evaluateLogSeverity(
+          event.eventName,
+          userId,
+          event.eventSource || '',
+          event.requestParameters
+        ),
+        rawJson: JSON.stringify(event, null, 2),
+        awsRegion: event.awsRegion || 'us-east-1',
       };
     });
 

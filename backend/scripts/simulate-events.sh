@@ -80,7 +80,7 @@ if aws_local iam list-users --query "Users[].UserName" --output text | grep -q "
 else
     aws_local iam create-user --user-name john-doe
     # Simulate virtual MFA configuration
-    aws_local iam create-virtual-mfa-device --virtual-mfa-device-name "john-doe-mfa" > /dev/null
+    aws_local iam create-virtual-mfa-device --virtual-mfa-device-name "john-doe-mfa" --outfile /tmp/qr.png --bootstrap-method QRCodePNG > /dev/null
     aws_local iam enable-mfa-device \
         --user-name john-doe \
         --serial-number "arn:aws:iam::000000000000:mfa/john-doe-mfa" \

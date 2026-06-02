@@ -21,10 +21,14 @@ const awsCredentials = {
   sessionToken
 };
 
-// AWS SDK Clients Initialization pointing to LocalStack (localhost:4566)
+// AWS SDK Clients Initialization pointing to our Vite proxy (bypassing CORS checks)
+const localstackEndpoint = typeof window !== 'undefined'
+  ? `${window.location.origin}/aws-local`
+  : 'http://localhost:4566';
+
 const clientConfig = {
   region,
-  endpoint: 'http://localhost:4566',
+  endpoint: localstackEndpoint,
   credentials: awsCredentials,
   forcePathStyle: true // Safe for local S3
 };

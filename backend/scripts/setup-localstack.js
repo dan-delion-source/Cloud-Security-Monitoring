@@ -2,7 +2,7 @@ const { DynamoDBClient, CreateTableCommand, ListTablesCommand } = require('@aws-
 const { S3Client, CreateBucketCommand, ListBucketsCommand } = require('@aws-sdk/client-s3');
 const { SNSClient, CreateTopicCommand, SubscribeCommand } = require('@aws-sdk/client-sns');
 const { SQSClient, CreateQueueCommand, GetQueueAttributesCommand } = require('@aws-sdk/client-sqs');
-const { LambdaClient, CreateFunctionCommand, UpdateFunctionCodeCommand, ListFunctionsCommand, CreateEventSourceMappingCommand, ListEventSourceMappingsCommand } = require('@aws-sdk/client-lambda');
+const { LambdaClient, CreateFunctionCommand, UpdateFunctionCodeCommand, ListFunctionsCommand, CreateEventSourceMappingCommand, ListEventSourceMappingsCommand, DeleteFunctionCommand } = require('@aws-sdk/client-lambda');
 const AdmZip = require('adm-zip');
 const fs = require('fs');
 const path = require('path');
@@ -33,17 +33,21 @@ const lambdaClient = new LambdaClient(clientConfig);
 // services. Using 'localhost' inside a Lambda container refers to the Lambda
 // container itself, NOT the LocalStack host.
 function resolveLocalStackInternalEndpoint() {
-  try {
-    const ip = execSync(
-      "docker inspect localstack --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'"
-    ).toString().trim();
-    if (ip) {
-      console.log(`[*] Resolved LocalStack internal IP: ${ip}`);
-      return `http://${ip}:4566`;
+  const containers = ['localstack-main', 'localstack'];
+  for (const name of containers) {
+    try {
+      const ip = execSync(
+        `docker inspect ${name} --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'`
+      ).toString().trim();
+      if (ip && ip !== 'invalid IP') {
+        console.log(`[*] Resolved LocalStack internal IP from "${name}": ${ip}`);
+        return `http://${ip}:4566`;
+      }
+    } catch (err) {
+      // Keep trying
     }
-  } catch (err) {
-    console.warn('[!] Could not resolve LocalStack container IP, falling back to ENDPOINT.');
   }
+  console.warn('[!] Could not resolve LocalStack container IP, falling back to ENDPOINT.');
   return ENDPOINT;
 }
 
@@ -188,30 +192,26 @@ async function main() {
       const exists = listRes.Functions?.some(f => f.FunctionName === lambdaName);
 
       if (exists) {
-        console.log(`[-] Lambda "${lambdaName}" exists. Updating code...`);
-        await lambdaClient.send(new UpdateFunctionCodeCommand({
-          FunctionName: lambdaName,
-          ZipFile: zipBuffer
-        }));
-        console.log(`[✓] Lambda "${lambdaName}" code updated.`);
-      } else {
-        await lambdaClient.send(new CreateFunctionCommand({
-          FunctionName: lambdaName,
-          Runtime: 'nodejs18.x',
-          Role: role,
-          Handler: `${lambdaName}.handler`,
-          Code: {
-            ZipFile: zipBuffer
-          },
-          Timeout: 15,
-          Environment: {
-            Variables: {
-              AWS_ENDPOINT_URL: LAMBDA_ENDPOINT
-            }
-          }
-        }));
-        console.log(`[✓] Lambda "${lambdaName}" created.`);
+        console.log(`[-] Lambda "${lambdaName}" exists. Deleting first for a fresh config deployment...`);
+        await lambdaClient.send(new DeleteFunctionCommand({ FunctionName: lambdaName }));
       }
+
+      await lambdaClient.send(new CreateFunctionCommand({
+        FunctionName: lambdaName,
+        Runtime: 'nodejs18.x',
+        Role: role,
+        Handler: `${lambdaName}.handler`,
+        Code: {
+          ZipFile: zipBuffer
+        },
+        Timeout: 15,
+        Environment: {
+          Variables: {
+            AWS_ENDPOINT_URL: LAMBDA_ENDPOINT
+          }
+        }
+      }));
+      console.log(`[✓] Lambda "${lambdaName}" successfully deployed.`);
     } catch (err) {
       console.error(`[✗] Lambda "${lambdaName}" deployment failed:`, err.message);
     }

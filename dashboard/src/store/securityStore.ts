@@ -90,7 +90,7 @@ export const useSecurityStore = create<SecurityState>((set) => ({
     secretAccessKey: '',
     region: 'us-east-1'
   },
-  isMockMode: true, // Sandbox mode active by default
+  isMockMode: false, // Sandbox mode active by default
 
   isLoading: false,
   isScanning: false,

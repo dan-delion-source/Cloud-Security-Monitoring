@@ -9,7 +9,13 @@ export default defineConfig({
       '/aws-local': {
         target: 'http://localhost:4566',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/aws-local/, '')
+        rewrite: (path) => path.replace(/^\/aws-local/, ''),
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq) => {
+            proxyReq.setHeader('origin', 'http://localhost:4566');
+            proxyReq.setHeader('referer', 'http://localhost:4566/');
+          });
+        }
       }
     }
   }

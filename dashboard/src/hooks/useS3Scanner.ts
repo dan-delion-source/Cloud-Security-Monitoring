@@ -101,9 +101,10 @@ const MOCK_BUCKETS: S3BucketScanResult[] = [
 ];
 
 export function useS3Scanner() {
-  const { setBuckets, scanTriggerCount, setIsLoading, buckets, isMockMode } = useSecurityStore();
+  const { setBuckets, scanTriggerCount, setIsLoading, isMockMode } = useSecurityStore();
 
   const scanS3Buckets = useCallback(async (triggerLambda = false) => {
+    const { buckets } = useSecurityStore.getState();
     setIsLoading(true);
 
     if (isMockMode) {
@@ -252,19 +253,19 @@ export function useS3Scanner() {
 
     setBuckets(scanResults);
     setIsLoading(false);
-  }, [setBuckets, setIsLoading, buckets, isMockMode]);
+  }, [setBuckets, setIsLoading, isMockMode]);
 
-  // Scan on mount
+  // Scan on mount – re-fetch whenever the callback identity changes (i.e. isMockMode flips)
   useEffect(() => {
     scanS3Buckets(false);
-  }, [isMockMode]);
+  }, [scanS3Buckets]);
 
   // Explicit scan trigger (Run Scan clicked)
   useEffect(() => {
     if (scanTriggerCount > 0) {
       scanS3Buckets(true);
     }
-  }, [scanTriggerCount]);
+  }, [scanTriggerCount, scanS3Buckets]);
 
   return { refresh: () => scanS3Buckets(false) };
 }

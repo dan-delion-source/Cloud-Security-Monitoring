@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import { useSecurityStore } from '../store/securityStore';
 import { useCloudTrail } from '../hooks/useCloudTrail';
 import { useVpcFlowLogs } from '../hooks/useVpcFlowLogs';
@@ -35,9 +35,12 @@ export const Overview: React.FC = () => {
     setSelectedEvent 
   } = useSecurityStore();
 
-  // Populate active alerts dynamically if empty
+  // Populate active alerts dynamically if empty (ref guard prevents re-triggering after setting)
+  const alertsPopulated = useRef(false);
   useEffect(() => {
+    if (alertsPopulated.current) return;
     if (activeAlerts.length === 0 && (logs.length > 0 || unauthorizedEvents.length > 0 || buckets.length > 0 || iamAnomalies.length > 0)) {
+      alertsPopulated.current = true;
       const alertsList: any[] = [];
 
       // Log alerts (Critical & High only)
@@ -98,19 +101,22 @@ export const Overview: React.FC = () => {
     }
   }, [logs, unauthorizedEvents, buckets, iamAnomalies, activeAlerts, setActiveAlerts]);
 
-  // Compute live KPI metrics
-  const criticalCount = 
+  // Compute live KPI metrics (memoized to avoid recalculation on every render)
+  const criticalCount = useMemo(() =>
     logs.filter(l => l.severity === 'CRITICAL').length +
     unauthorizedEvents.filter(e => e.severity === 'CRITICAL').length +
     buckets.filter(b => !b.remediated && b.severity === 'CRITICAL').length +
-    iamAnomalies.filter(i => i.severity === 'CRITICAL').length;
+    iamAnomalies.filter(i => i.severity === 'CRITICAL').length,
+  [logs, unauthorizedEvents, buckets, iamAnomalies]);
 
   const unauthCount = unauthorizedEvents.length;
-  const exposedS3Count = buckets.filter(b => !b.remediated && (b.severity === 'CRITICAL' || b.severity === 'HIGH')).length;
+  const exposedS3Count = useMemo(() =>
+    buckets.filter(b => !b.remediated && (b.severity === 'CRITICAL' || b.severity === 'HIGH')).length,
+  [buckets]);
   const iamAnomalyCount = iamAnomalies.length;
 
   // Last 6 logs for bottom panel
-  const recentLogs = logs.slice(0, 6);
+  const recentLogs = useMemo(() => logs.slice(0, 6), [logs]);
 
   return (
     <div className="space-y-4">
@@ -185,12 +191,12 @@ export const Overview: React.FC = () => {
 
         {/* Table Layout */}
         <div className="border border-gray-200 dark:border-gray-800 rounded-lg overflow-hidden">
-          <div className="flex items-center bg-gray-50 dark:bg-[#152035]/60 text-[10px] font-extrabold uppercase tracking-wider text-gray-500 dark:text-gray-400 py-3 px-4 select-none">
-            <div className="w-12 text-center">Severity</div>
-            <div className="w-[22%] pr-3">Event Name</div>
-            <div className="w-[38%] pr-3">Principal ARN</div>
-            <div className="w-[18%]">Source IP</div>
-            <div className="w-[22%] text-right">Timestamp</div>
+          <div className="flex items-center bg-gray-50 dark:bg-[#152035]/60 text-xs font-extrabold uppercase tracking-wider text-gray-500 dark:text-gray-400 py-3 px-4 select-none">
+            <div className="w-24 text-center shrink-0">Severity</div>
+            <div className="w-[24%] pr-4 shrink-0">Event Name</div>
+            <div className="w-[34%] pr-4 shrink-0">Principal ARN</div>
+            <div className="w-[18%] shrink-0">Source IP</div>
+            <div className="flex-1 text-right shrink-0">Timestamp</div>
           </div>
 
           <div className="divide-y divide-gray-100 dark:divide-gray-800/60 relative h-[264px]">

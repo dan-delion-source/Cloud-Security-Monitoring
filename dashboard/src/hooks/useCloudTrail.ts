@@ -110,6 +110,7 @@ export function useCloudTrail() {
   const { prependLogs, setLogs, scanTriggerCount, setIsLoading, isMockMode, setActiveAlerts } = useSecurityStore();
 
   const fetchCloudTrail = useCallback(async (isInitial = false) => {
+    const { blockedIps, mutedEvents } = useSecurityStore.getState();
     setIsLoading(true);
     
     if (isMockMode) {
@@ -135,6 +136,8 @@ export function useCloudTrail() {
           ),
           rawJson: JSON.stringify(event, null, 2),
           awsRegion: event.awsRegion,
+          isBlocked: blockedIps.includes(event.sourceIPAddress),
+          isMuted: mutedEvents.includes(event.eventName)
         };
       });
       
@@ -166,6 +169,8 @@ export function useCloudTrail() {
             additionalEventData: { MFAUsed: 'No', Alert: 'Suspicious IP' }
           }, null, 2),
           awsRegion: 'us-east-1',
+          isBlocked: blockedIps.includes('109.112.54.120'),
+          isMuted: mutedEvents.includes('ConsoleLogin')
         };
         
         prependLogs([demoPollEvent]);
@@ -196,7 +201,12 @@ export function useCloudTrail() {
         );
         if (getErr || !getRes || !getRes.Body) return;
         try {
-          const bodyStr = await getRes.Body.transformToString('utf-8');
+          let bodyStr = '';
+          if (typeof (getRes.Body as any).transformToString === 'function') {
+            bodyStr = await (getRes.Body as any).transformToString('utf-8');
+          } else {
+            bodyStr = await new Response(getRes.Body as any).text();
+          }
           const data = JSON.parse(bodyStr);
           if (data.Records) {
             allRecords.push(...data.Records);
@@ -211,6 +221,7 @@ export function useCloudTrail() {
     const parsedLogs: ParsedLog[] = allRecords.map((event: any) => {
       const userId = event.userIdentity || {};
       const arn = userId.arn || `arn:aws:iam::000000000000:${userId.type === 'Root' ? 'root' : userId.userName || 'unknown'}`;
+      const srcIp = event.sourceIPAddress || '127.0.0.1';
       
       return {
         id: event.eventID || String(Math.random()),
@@ -218,7 +229,7 @@ export function useCloudTrail() {
         eventName: event.eventName,
         eventSource: event.eventSource ? event.eventSource.split('.')[0] : 'unknown',
         principalArn: arn,
-        sourceIP: event.sourceIPAddress || '127.0.0.1',
+        sourceIP: srcIp,
         severity: evaluateLogSeverity(
           event.eventName,
           userId,
@@ -227,6 +238,8 @@ export function useCloudTrail() {
         ),
         rawJson: JSON.stringify(event, null, 2),
         awsRegion: event.awsRegion || 'us-east-1',
+        isBlocked: blockedIps.includes(srcIp),
+        isMuted: mutedEvents.includes(event.eventName)
       };
     });
 
@@ -244,10 +257,10 @@ export function useCloudTrail() {
     setIsLoading(false);
   }, [prependLogs, setLogs, setIsLoading, isMockMode, setActiveAlerts]);
 
-  // Initial load
+  // Initial load – re-fetch whenever the callback identity changes (i.e. isMockMode flips)
   useEffect(() => {
     fetchCloudTrail(true);
-  }, [isMockMode]);
+  }, [fetchCloudTrail]);
 
   // Scan triggers
   useEffect(() => {

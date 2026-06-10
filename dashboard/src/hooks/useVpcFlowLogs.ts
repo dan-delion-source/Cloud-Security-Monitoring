@@ -177,17 +177,17 @@ export function useVpcFlowLogs() {
     setIsLoading(false);
   }, [setUnauthorizedEvents, setIsLoading, isMockMode]);
 
-  // Initial load
+  // Initial load – re-fetch whenever the callback identity changes (i.e. isMockMode flips)
   useEffect(() => {
     fetchUnauthEvents(false);
-  }, [isMockMode]);
+  }, [fetchUnauthEvents]);
 
   // Explicit scan trigger (Run Scan clicked)
   useEffect(() => {
     if (scanTriggerCount > 0) {
       fetchUnauthEvents(true);
     }
-  }, [scanTriggerCount]);
+  }, [scanTriggerCount, fetchUnauthEvents]);
 
   return { refresh: () => fetchUnauthEvents(false) };
 }

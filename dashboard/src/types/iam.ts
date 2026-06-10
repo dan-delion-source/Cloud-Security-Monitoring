@@ -5,7 +5,7 @@ export interface IamAnomaly {
   severity: Severity;
   title: string;
   detail: string; // e.g., "ARN / event source"
-  actionText: 'Investigate ↗' | 'Review ↗' | 'Remediate ↗' | 'Rotate ↗';
+  actionText: string;
   pattern: string; // The rule key that was matched
   timestamp: string;
   resourceArn: string;

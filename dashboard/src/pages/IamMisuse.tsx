@@ -9,7 +9,7 @@ export const IamMisuse: React.FC = () => {
   // Activate IAM anomaly check hook, extracting liveUsers from LocalStack
   const { liveUsers } = useIamReport();
 
-  const { iamAnomalies } = useSecurityStore();
+  const { iamAnomalies, unsuspendIamUser } = useSecurityStore();
 
   return (
     <div className="space-y-4">
@@ -38,7 +38,9 @@ export const IamMisuse: React.FC = () => {
             <div 
               key={user.userName}
               className={`p-4 border rounded-xl bg-gray-50/30 dark:bg-[#121B2F]/20 flex flex-col justify-between space-y-3.5 transition-all hover:shadow-md ${
-                user.complianceStatus === 'NON_COMPLIANT'
+                user.complianceStatus === 'SUSPENDED'
+                  ? 'border-amber-500/20 hover:border-amber-500/30 bg-amber-500/[0.02]'
+                  : user.complianceStatus === 'NON_COMPLIANT'
                   ? 'border-red-500/20 hover:border-red-500/30'
                   : 'border-emerald-500/20 hover:border-emerald-500/30'
               }`}
@@ -55,6 +57,11 @@ export const IamMisuse: React.FC = () => {
                         <AlertTriangle className="w-2.5 h-2.5" />
                         Breach
                       </span>
+                    ) : user.complianceStatus === 'SUSPENDED' ? (
+                      <span className="flex items-center gap-0.5 text-[8px] font-black uppercase px-1.5 py-0.2 bg-amber-500/10 text-amber-600 border border-amber-500/15 rounded shrink-0">
+                        <ShieldAlert className="w-2.5 h-2.5" />
+                        Suspended
+                      </span>
                     ) : (
                       <span className="flex items-center gap-0.5 text-[8px] font-black uppercase px-1.5 py-0.2 bg-emerald-500/10 text-emerald-500 border border-emerald-500/10 rounded shrink-0">
                         <CheckCircle2 className="w-2.5 h-2.5" />
@@ -66,6 +73,14 @@ export const IamMisuse: React.FC = () => {
                     {user.arn}
                   </p>
                 </div>
+                {user.complianceStatus === 'SUSPENDED' && (
+                  <button
+                    onClick={() => unsuspendIamUser(user.userName)}
+                    className="px-2 py-0.5 text-[8px] font-bold text-emerald-600 border border-emerald-500/20 hover:bg-emerald-500/10 rounded transition shrink-0"
+                  >
+                    Restore
+                  </button>
+                )}
               </div>
 
               {/* MFA & Policies */}

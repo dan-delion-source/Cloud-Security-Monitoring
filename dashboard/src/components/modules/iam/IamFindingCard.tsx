@@ -11,7 +11,8 @@ import {
   AlertOctagon,
   Eye,
   FileCode,
-  RotateCcw
+  RotateCcw,
+  CheckCircle2
 } from 'lucide-react';
 import StatusBadge from '../../shared/StatusBadge';
 
@@ -77,6 +78,7 @@ export const IamFindingCard: React.FC<IamFindingCardProps> = ({ finding }) => {
 
   // Pick button icon based on action text
   const getButtonIcon = () => {
+    if (finding.actionText === 'Remediated') return <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />;
     if (finding.actionText.includes('Investigate')) return <Eye className="w-3.5 h-3.5 shrink-0" />;
     if (finding.actionText.includes('Rotate')) return <RotateCcw className="w-3.5 h-3.5 shrink-0" />;
     return <FileCode className="w-3.5 h-3.5 shrink-0" />;
@@ -119,7 +121,9 @@ export const IamFindingCard: React.FC<IamFindingCardProps> = ({ finding }) => {
             e.stopPropagation();
             setSelectedEvent({ type: 'iam', data: finding });
           }}
-          className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold text-white rounded-lg transition-all shadow-sm hover:shadow ${
+          disabled={finding.actionText === 'Remediated'}
+          className={`flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold text-white rounded-lg transition-all shadow-sm ${
+            finding.actionText === 'Remediated' ? 'bg-emerald-600 opacity-90 cursor-default' :
             finding.severity === 'CRITICAL' ? 'bg-[#E24B4A] hover:bg-red-650' :
             finding.severity === 'HIGH' ? 'bg-[#EF9F27] hover:bg-amber-600' :
             finding.severity === 'MEDIUM' ? 'bg-[#378ADD] hover:bg-blue-600' : 'bg-slate-700 hover:bg-slate-800'

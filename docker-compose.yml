@@ -1,13 +1,13 @@
-version: '3.8'
-
+# docker-compose.yml
+version: "3.8"
 services:
   localstack:
-    container_name: localstack_security_system
-    image: localstack/localstack:latest
+    image: localstack/localstack
     ports:
-      - "127.0.0.1:4566:4566"            # LocalStack Edge Port
+      - "4566:4566" # Main gateway port
     environment:
-      - SERVICES=s3,dynamodb,lambda,iam,ec2,sns,sqs,cloudtrail
+      - SERVICES=s3,lambda,dynamodb,sqs,sns,iam,sts,cloudtrail,ec2,secretsmanager
+      - DEBUG=1
       - AWS_DEFAULT_REGION=us-east-1
     volumes:
-      - "./.localstack:/var/lib/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"

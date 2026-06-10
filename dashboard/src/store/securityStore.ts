@@ -33,6 +33,13 @@ interface SecurityState {
   iamAnomalies: IamAnomaly[];
   activeAlerts: SecurityAlert[];
   
+  // Firewall / Remediation State
+  blockedIps: string[];
+  mutedEvents: string[];
+  suspendedUsers: string[];
+  remediatedAnomalies: string[];
+  remediationLogs: Array<{ id: string; timestamp: string; action: string; target: string; status: 'SUCCESS' | 'FAILED' }>;
+
   // Credentials and configuration state
   awsConfig: {
     accessKeyId: string;
@@ -45,7 +52,7 @@ interface SecurityState {
   isLoading: boolean;
   isScanning: boolean;
   lastScanTime: string | null;
-  selectedEvent: { type: 'log' | 'unauth' | 'iam' | 's3'; data: any } | null;
+  selectedEvent: { type: 'log' | 'unauth' | 'iam' | 's3'; data: Record<string, unknown> } | null;
   
   // Log Filters
   logFilter: 'ALL' | Severity;
@@ -66,10 +73,20 @@ interface SecurityState {
   
   setIsLoading: (loading: boolean) => void;
   setIsScanning: (scanning: boolean) => void;
-  setSelectedEvent: (event: { type: 'log' | 'unauth' | 'iam' | 's3'; data: any } | null) => void;
+  setSelectedEvent: (event: { type: 'log' | 'unauth' | 'iam' | 's3'; data: Record<string, unknown> } | null) => void;
   setLogFilter: (filter: 'ALL' | Severity) => void;
   setLogSearchQuery: (query: string) => void;
   
+  // Countermeasure actions
+  blockIpAddress: (ip: string) => void;
+  unblockIpAddress: (ip: string) => void;
+  muteEventName: (eventName: string) => void;
+  unmuteEventName: (eventName: string) => void;
+  suspendIamUser: (userName: string) => void;
+  unsuspendIamUser: (userName: string) => void;
+  remediateAnomaly: (anomalyId: string) => void;
+  addRemediationLog: (action: string, target: string, status: 'SUCCESS' | 'FAILED') => void;
+
   // Connector actions
   updateAwsConfig: (config: { accessKeyId: string; secretAccessKey: string; region: string }) => void;
   toggleMockMode: () => void;
@@ -85,12 +102,18 @@ export const useSecurityStore = create<SecurityState>((set) => ({
   iamAnomalies: [],
   activeAlerts: [],
   
+  blockedIps: [],
+  mutedEvents: [],
+  suspendedUsers: [],
+  remediatedAnomalies: [],
+  remediationLogs: [],
+
   awsConfig: {
     accessKeyId: '',
     secretAccessKey: '',
     region: 'us-east-1'
   },
-  isMockMode: false, // Sandbox mode active by default
+  isMockMode: true, // Sandbox mode active by default
 
   isLoading: false,
   isScanning: false,
@@ -160,20 +183,170 @@ export const useSecurityStore = create<SecurityState>((set) => ({
   
   setLogFilter: (logFilter) => set({ logFilter }),
   setLogSearchQuery: (logSearchQuery) => set({ logSearchQuery }),
-  
-  updateAwsConfig: (awsConfig) => set({ awsConfig }),
-  toggleMockMode: () => set((state) => ({ isMockMode: !state.isMockMode })),
-  
-  triggerScan: () => set((state) => {
-    // Self-healing timeout: automatically reset isScanning state to false after 2 seconds
-    setTimeout(() => {
-      set({ isScanning: false });
-    }, 2000);
-    return { 
-      scanTriggerCount: state.scanTriggerCount + 1,
-      isScanning: true 
+
+  // Countermeasure implementation
+  blockIpAddress: (ip) => set((state) => {
+    if (state.blockedIps.includes(ip)) return {};
+    const newLogs = [
+      {
+        id: `remedy-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: new Date().toISOString(),
+        action: 'BLOCK_IP',
+        target: ip,
+        status: 'SUCCESS' as const
+      },
+      ...state.remediationLogs
+    ];
+    return {
+      blockedIps: [...state.blockedIps, ip],
+      remediationLogs: newLogs
     };
   }),
+
+  unblockIpAddress: (ip) => set((state) => {
+    const newLogs = [
+      {
+        id: `remedy-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: new Date().toISOString(),
+        action: 'UNBLOCK_IP',
+        target: ip,
+        status: 'SUCCESS' as const
+      },
+      ...state.remediationLogs
+    ];
+    return {
+      blockedIps: state.blockedIps.filter(item => item !== ip),
+      remediationLogs: newLogs
+    };
+  }),
+
+  muteEventName: (eventName) => set((state) => {
+    if (state.mutedEvents.includes(eventName)) return {};
+    const newLogs = [
+      {
+        id: `remedy-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: new Date().toISOString(),
+        action: 'MUTE_EVENT',
+        target: eventName,
+        status: 'SUCCESS' as const
+      },
+      ...state.remediationLogs
+    ];
+    return {
+      mutedEvents: [...state.mutedEvents, eventName],
+      remediationLogs: newLogs
+    };
+  }),
+
+  unmuteEventName: (eventName) => set((state) => {
+    const newLogs = [
+      {
+        id: `remedy-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: new Date().toISOString(),
+        action: 'UNMUTE_EVENT',
+        target: eventName,
+        status: 'SUCCESS' as const
+      },
+      ...state.remediationLogs
+    ];
+    return {
+      mutedEvents: state.mutedEvents.filter(item => item !== eventName),
+      remediationLogs: newLogs
+    };
+  }),
+
+  suspendIamUser: (userName) => set((state) => {
+    if (state.suspendedUsers.includes(userName)) return {};
+    const newLogs = [
+      {
+        id: `remedy-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: new Date().toISOString(),
+        action: 'SUSPEND_IAM_USER',
+        target: userName,
+        status: 'SUCCESS' as const
+      },
+      ...state.remediationLogs
+    ];
+    return {
+      suspendedUsers: [...state.suspendedUsers, userName],
+      remediationLogs: newLogs
+    };
+  }),
+
+  unsuspendIamUser: (userName) => set((state) => {
+    const newLogs = [
+      {
+        id: `remedy-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: new Date().toISOString(),
+        action: 'RESTORE_IAM_USER',
+        target: userName,
+        status: 'SUCCESS' as const
+      },
+      ...state.remediationLogs
+    ];
+    return {
+      suspendedUsers: state.suspendedUsers.filter(item => item !== userName),
+      remediationLogs: newLogs
+    };
+  }),
+
+  remediateAnomaly: (anomalyId) => set((state) => {
+    if (state.remediatedAnomalies.includes(anomalyId)) return {};
+    const newLogs = [
+      {
+        id: `remedy-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: new Date().toISOString(),
+        action: 'REMEDIATE_ANOMALY',
+        target: anomalyId,
+        status: 'SUCCESS' as const
+      },
+      ...state.remediationLogs
+    ];
+    return {
+      remediatedAnomalies: [...state.remediatedAnomalies, anomalyId],
+      remediationLogs: newLogs
+    };
+  }),
+
+  addRemediationLog: (action, target, status) => set((state) => ({
+    remediationLogs: [
+      {
+        id: `remedy-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: new Date().toISOString(),
+        action,
+        target,
+        status
+      },
+      ...state.remediationLogs
+    ]
+  })),
+  
+  updateAwsConfig: (awsConfig) => set({ awsConfig }),
+  toggleMockMode: () => set((state) => {
+    const next = !state.isMockMode;
+    console.log(`[securityStore] toggleMockMode: ${state.isMockMode ? 'SANDBOX' : 'LIVE'} → ${next ? 'SANDBOX' : 'LIVE'}`);
+    // Clear stale data so hooks re-populate from the correct source
+    return {
+      isMockMode: next,
+      logs: [],
+      unauthorizedEvents: [],
+      buckets: [],
+      iamAnomalies: [],
+      activeAlerts: [],
+    };
+  }),
+  
+  triggerScan: () => {
+    // Self-healing timeout: automatically reset isScanning state to false after 2 seconds
+    // (Moved outside set() to avoid side-effects inside Zustand state setter)
+    setTimeout(() => {
+      useSecurityStore.setState({ isScanning: false });
+    }, 2000);
+    set((state) => ({
+      scanTriggerCount: state.scanTriggerCount + 1,
+      isScanning: true,
+    }));
+  },
   
   resetStore: () => set({
     logs: [],
@@ -181,6 +354,11 @@ export const useSecurityStore = create<SecurityState>((set) => ({
     buckets: [],
     iamAnomalies: [],
     activeAlerts: [],
+    blockedIps: [],
+    mutedEvents: [],
+    suspendedUsers: [],
+    remediatedAnomalies: [],
+    remediationLogs: [],
     lastScanTime: null,
     selectedEvent: null,
     awsConfig: {
@@ -197,6 +375,11 @@ export const useSecurityStore = create<SecurityState>((set) => ({
     buckets: [],
     iamAnomalies: [],
     activeAlerts: [],
+    blockedIps: [],
+    mutedEvents: [],
+    suspendedUsers: [],
+    remediatedAnomalies: [],
+    remediationLogs: [],
     lastScanTime: null,
     selectedEvent: null
   })

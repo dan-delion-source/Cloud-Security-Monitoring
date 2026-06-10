@@ -13,7 +13,7 @@ export interface IamUser {
   createDate: string;
   attachedPolicies: string[];
   mfaActive: boolean;
-  complianceStatus: 'COMPLIANT' | 'NON_COMPLIANT';
+  complianceStatus: 'COMPLIANT' | 'NON_COMPLIANT' | 'SUSPENDED';
   findingsCount: number;
 }
 
@@ -102,7 +102,7 @@ const MOCK_IAM_ANOMALIES: IamAnomaly[] = [
 ];
 
 export function useIamReport() {
-  const { setIamAnomalies, scanTriggerCount, setIsLoading, isMockMode } = useSecurityStore();
+  const { setIamAnomalies, scanTriggerCount, setIsLoading, isMockMode, suspendedUsers, remediatedAnomalies } = useSecurityStore();
   const [liveUsers, setLiveUsers] = useState<IamUser[]>([]);
 
   const scanIamCompliance = useCallback(async (triggerLambda = false) => {
@@ -110,8 +110,28 @@ export function useIamReport() {
 
     if (isMockMode) {
       await new Promise(resolve => setTimeout(resolve, 700));
-      setIamAnomalies(MOCK_IAM_ANOMALIES);
-      setLiveUsers(MOCK_LIVE_USERS);
+
+      const mappedAnomalies = MOCK_IAM_ANOMALIES.map(anomaly => {
+        const isRemediated = remediatedAnomalies.includes(anomaly.id) || 
+          (anomaly.resourceArn && suspendedUsers.some(u => anomaly.resourceArn.includes(u)));
+        return {
+          ...anomaly,
+          severity: isRemediated ? 'LOW' as Severity : anomaly.severity,
+          actionText: isRemediated ? 'Remediated' : anomaly.actionText
+        };
+      });
+
+      const mappedUsers = MOCK_LIVE_USERS.map(user => {
+        const isSuspended = suspendedUsers.includes(user.userName);
+        return {
+          ...user,
+          complianceStatus: isSuspended ? 'SUSPENDED' as const : user.complianceStatus,
+          findingsCount: isSuspended ? 0 : user.findingsCount
+        };
+      });
+
+      setIamAnomalies(mappedAnomalies);
+      setLiveUsers(mappedUsers);
       setIsLoading(false);
       return;
     }
@@ -155,16 +175,24 @@ export function useIamReport() {
         );
         const mfaActive = (mfaRes?.MFADevices?.length || 0) > 0;
 
+        const isSuspended = suspendedUsers.includes(userName);
         const hasAdmin = policies.some(name => name.includes('AdministratorAccess'));
-        const isNonCompliant = hasAdmin || !mfaActive;
+        
+        const isMfaRemediated = remediatedAnomalies.includes(`iam-mfa-${userName}`);
+        const isAdminRemediated = remediatedAnomalies.includes(`iam-admin-${userName}`);
+
+        const hasAdminFinding = hasAdmin && !isAdminRemediated && !isSuspended;
+        const hasMfaFinding = !mfaActive && !isMfaRemediated && !isSuspended;
+
+        const isNonCompliant = hasAdminFinding || hasMfaFinding;
 
         if (hasAdmin) {
           derivedAnomalies.push({
             id: `iam-admin-${userName}`,
-            severity: 'CRITICAL',
+            severity: isAdminRemediated || isSuspended ? 'LOW' : 'CRITICAL',
             title: 'Direct Privilege Escalation Vector: AdministratorAccess',
             detail: `Direct attachment of highly privileged system administrative policy on IAM user account "${userName}".`,
-            actionText: 'Remediate ↗',
+            actionText: isAdminRemediated || isSuspended ? 'Remediated' : 'Remediate ↗',
             pattern: 'admin_policy_exposed',
             timestamp: u.CreateDate?.toISOString() || new Date().toISOString(),
             resourceArn: u.Arn || `arn:aws:iam::000000000000:user/${userName}`
@@ -174,10 +202,10 @@ export function useIamReport() {
         if (!mfaActive) {
           derivedAnomalies.push({
             id: `iam-mfa-${userName}`,
-            severity: 'MEDIUM',
+            severity: isMfaRemediated || isSuspended ? 'LOW' : 'MEDIUM',
             title: 'MFA protection disabled for Console-accessible IAM User',
             detail: `IAM user "${userName}" does not have active Multi-Factor Authentication (MFA) enabled.`,
-            actionText: 'Review ↗',
+            actionText: isMfaRemediated || isSuspended ? 'Remediated' : 'Review ↗',
             pattern: 'mfa_missing',
             timestamp: u.CreateDate?.toISOString() || new Date().toISOString(),
             resourceArn: u.Arn || `arn:aws:iam::000000000000:user/${userName}`
@@ -190,8 +218,8 @@ export function useIamReport() {
           createDate: u.CreateDate?.toISOString() || new Date().toISOString(),
           attachedPolicies: policies,
           mfaActive,
-          complianceStatus: isNonCompliant ? 'NON_COMPLIANT' : 'COMPLIANT',
-          findingsCount: (hasAdmin ? 1 : 0) + (!mfaActive ? 1 : 0)
+          complianceStatus: isSuspended ? 'SUSPENDED' : isNonCompliant ? 'NON_COMPLIANT' : 'COMPLIANT',
+          findingsCount: (hasAdminFinding ? 1 : 0) + (hasMfaFinding ? 1 : 0)
         });
       }
     }
@@ -204,17 +232,22 @@ export function useIamReport() {
     if (!ddbErr && ddbRes?.Items) {
       const iamAlerts = ddbRes.Items.filter((item: any) => item.type === 'IAM_MISUSE');
       iamAlerts.forEach((item: any) => {
+        const userName = item.resource;
+        const isSuspended = suspendedUsers.includes(userName);
+        const alertId = item.alertId || String(Math.random());
+        const isRemediated = remediatedAnomalies.includes(alertId) || isSuspended;
+
         // Prevent duplicates
         if (!derivedAnomalies.some(a => a.resourceArn.includes(item.resource))) {
           const isCritical = item.severity === 'CRITICAL';
           derivedAnomalies.push({
-            id: item.alertId || String(Math.random()),
-            severity: (item.severity || 'LOW') as Severity,
+            id: alertId,
+            severity: isRemediated ? 'LOW' : (item.severity || 'LOW') as Severity,
             title: isCritical 
               ? 'Privilege Escalation: Direct AdministratorAccess Attachment' 
               : 'Console User Lacking Multi-Factor Authentication (MFA)',
             detail: item.detail || `Direct compliance violation on IAM user "${item.resource}"`,
-            actionText: isCritical ? 'Remediate ↗' : 'Review ↗',
+            actionText: isRemediated ? 'Remediated' : (isCritical ? 'Remediate ↗' : 'Review ↗'),
             pattern: isCritical ? 'admin_policy_exposed' : 'mfa_missing',
             timestamp: item.timestamp || new Date().toISOString(),
             resourceArn: `arn:aws:iam::000000000000:user/${item.resource}`,
@@ -226,21 +259,28 @@ export function useIamReport() {
     }
 
     setIamAnomalies(derivedAnomalies);
-    setLiveUsers(scannedUsers.length > 0 ? scannedUsers : MOCK_LIVE_USERS);
+    setLiveUsers(scannedUsers.length > 0 ? scannedUsers : MOCK_LIVE_USERS.map(user => {
+      const isSuspended = suspendedUsers.includes(user.userName);
+      return {
+        ...user,
+        complianceStatus: isSuspended ? 'SUSPENDED' as const : user.complianceStatus,
+        findingsCount: isSuspended ? 0 : user.findingsCount
+      };
+    }));
     setIsLoading(false);
-  }, [setIamAnomalies, setIsLoading, isMockMode]);
+  }, [setIamAnomalies, setIsLoading, isMockMode, suspendedUsers, remediatedAnomalies]);
 
-  // Scan on mount
+  // Scan on mount – re-fetch whenever the callback identity changes (i.e. isMockMode flips)
   useEffect(() => {
     scanIamCompliance(false);
-  }, [isMockMode]);
+  }, [scanIamCompliance]);
 
   // Explicit scan trigger (Run Scan clicked)
   useEffect(() => {
     if (scanTriggerCount > 0) {
       scanIamCompliance(true);
     }
-  }, [scanTriggerCount]);
+  }, [scanTriggerCount, scanIamCompliance]);
 
   return { refresh: () => scanIamCompliance(false), liveUsers };
 }

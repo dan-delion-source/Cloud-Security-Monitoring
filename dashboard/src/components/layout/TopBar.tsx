@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useSecurityStore } from '../../store/securityStore';
 import { RefreshCw, Sun, Moon } from 'lucide-react';
@@ -38,12 +38,13 @@ export const TopBar: React.FC = () => {
     }
   };
 
-  // Compute global critical counts
-  const criticalCount = 
+  // Compute global critical counts (memoized)
+  const criticalCount = useMemo(() =>
     logs.filter(l => l.severity === 'CRITICAL').length +
     unauthorizedEvents.filter(e => e.severity === 'CRITICAL').length +
     buckets.filter(b => !b.remediated && b.severity === 'CRITICAL').length +
-    iamAnomalies.filter(i => i.severity === 'CRITICAL').length;
+    iamAnomalies.filter(i => i.severity === 'CRITICAL').length,
+  [logs, unauthorizedEvents, buckets, iamAnomalies]);
 
   return (
     <header 

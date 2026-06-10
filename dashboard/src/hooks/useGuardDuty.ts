@@ -100,7 +100,7 @@ export function useGuardDuty() {
       },
       rawJson: JSON.stringify(finding, null, 2)
     }));
-  }, []);
+  }, [isMockMode]);
 
   return { fetchGuardDuty };
 }

@@ -37,4 +37,6 @@ export interface ParsedLog {
   rawJson: string; // Keep full raw event JSON string
   awsRegion: string;
   isNew?: boolean; // For highlighting new logs
+  isBlocked?: boolean;
+  isMuted?: boolean;
 }

@@ -2,6 +2,12 @@
   "name": "cloudsecurity-backend",
   "version": "1.0.0",
   "type": "commonjs",
+  "scripts": {
+    "setup": "node scripts/setup-localstack.js",
+    "simulate": "node scripts/simulate-events.js",
+    "live": "node scripts/live-simulation.js",
+    "mega": "node scripts/mega-simulation.js"
+  },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1053.0",
     "@aws-sdk/lib-dynamodb": "^3.1053.0",

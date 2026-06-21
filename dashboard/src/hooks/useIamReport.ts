@@ -259,14 +259,7 @@ export function useIamReport() {
     }
 
     setIamAnomalies(derivedAnomalies);
-    setLiveUsers(scannedUsers.length > 0 ? scannedUsers : MOCK_LIVE_USERS.map(user => {
-      const isSuspended = suspendedUsers.includes(user.userName);
-      return {
-        ...user,
-        complianceStatus: isSuspended ? 'SUSPENDED' as const : user.complianceStatus,
-        findingsCount: isSuspended ? 0 : user.findingsCount
-      };
-    }));
+    setLiveUsers(scannedUsers);
     setIsLoading(false);
   }, [setIamAnomalies, setIsLoading, isMockMode, suspendedUsers, remediatedAnomalies]);
 

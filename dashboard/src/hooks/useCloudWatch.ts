@@ -87,8 +87,7 @@ export function useCloudWatch() {
 
     if (err || !res || !res.logGroups) {
       console.warn('Could not fetch CloudWatch Log Groups:', err);
-      // Fallback to mock log groups in case LocalStack is empty/erroring
-      setLogGroups(MOCK_GROUPS);
+      setLogGroups([]);
       setIsLoading(false);
       return;
     }
@@ -98,14 +97,6 @@ export function useCloudWatch() {
       creationTime: g.creationTime,
       storedBytes: g.storedBytes
     }));
-
-    // Ensure our standard groups are at least listed
-    const existingNames = new Set(groups.map(g => g.logGroupName));
-    MOCK_GROUPS.forEach(g => {
-      if (!existingNames.has(g.logGroupName)) {
-        groups.push(g);
-      }
-    });
 
     setLogGroups(groups);
     setIsLoading(false);
@@ -137,14 +128,7 @@ export function useCloudWatch() {
 
     if (err || !res || !res.events) {
       console.warn(`Could not filter events for log group ${logGroupName}:`, err);
-      // Fallback to mock logs if live is empty (e.g. Lambda hasn't run yet)
-      const messages = MOCK_EVENTS_MAP[logGroupName] || [`[INFO] Live Log stream for ${logGroupName} is currently empty.`];
-      const events: LogEventInfo[] = messages.map((msg, idx) => ({
-        eventId: `mock-event-${idx}`,
-        timestamp: Date.now() - (messages.length - idx) * 5000,
-        message: msg
-      }));
-      setLogEvents(events);
+      setLogEvents([]);
       setIsLoading(false);
       return;
     }

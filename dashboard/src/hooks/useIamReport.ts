@@ -113,7 +113,7 @@ export function useIamReport() {
 
       const mappedAnomalies = MOCK_IAM_ANOMALIES.map(anomaly => {
         const isRemediated = remediatedAnomalies.includes(anomaly.id) || 
-          (anomaly.resourceArn && suspendedUsers.some(u => anomaly.resourceArn.includes(u)));
+          (anomaly.resourceArn && suspendedUsers.some(u => anomaly.resourceArn.includes(u.userName) && (!u.suspendUntil || new Date(u.suspendUntil) > new Date())));
         return {
           ...anomaly,
           severity: isRemediated ? 'LOW' as Severity : anomaly.severity,
@@ -122,7 +122,7 @@ export function useIamReport() {
       });
 
       const mappedUsers = MOCK_LIVE_USERS.map(user => {
-        const isSuspended = suspendedUsers.includes(user.userName);
+        const isSuspended = suspendedUsers.some(u => u.userName === user.userName && (!u.suspendUntil || new Date(u.suspendUntil) > new Date()));
         return {
           ...user,
           complianceStatus: isSuspended ? 'SUSPENDED' as const : user.complianceStatus,
@@ -175,7 +175,7 @@ export function useIamReport() {
         );
         const mfaActive = (mfaRes?.MFADevices?.length || 0) > 0;
 
-        const isSuspended = suspendedUsers.includes(userName);
+        const isSuspended = suspendedUsers.some(u => u.userName === userName && (!u.suspendUntil || new Date(u.suspendUntil) > new Date()));
         const hasAdmin = policies.some(name => name.includes('AdministratorAccess'));
         
         const isMfaRemediated = remediatedAnomalies.includes(`iam-mfa-${userName}`);
@@ -233,7 +233,7 @@ export function useIamReport() {
       const iamAlerts = ddbRes.Items.filter((item: any) => item.type === 'IAM_MISUSE');
       iamAlerts.forEach((item: any) => {
         const userName = item.resource;
-        const isSuspended = suspendedUsers.includes(userName);
+        const isSuspended = suspendedUsers.some(u => u.userName === userName && (!u.suspendUntil || new Date(u.suspendUntil) > new Date()));
         const alertId = item.alertId || String(Math.random());
         const isRemediated = remediatedAnomalies.includes(alertId) || isSuspended;
 

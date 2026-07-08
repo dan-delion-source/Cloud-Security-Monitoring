@@ -55,6 +55,8 @@ export const EventDrawer: React.FC = () => {
   const [showReport, setShowReport] = useState(false);
   const [copied, setCopied] = useState(false);
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
+  const [showSuspendMenu, setShowSuspendMenu] = useState(false);
+  const [customSuspendHours, setCustomSuspendHours] = useState('48');
 
   if (!selectedEvent) return null;
 
@@ -64,11 +66,13 @@ export const EventDrawer: React.FC = () => {
   // Derived state for this event
   const isIpBlocked   = data.sourceIP   && blockedIps.includes(data.sourceIP);
   const isEventMuted  = data.eventName  && mutedEvents.includes(data.eventName);
-  const isUserSuspended = (data.userName || extractUserFromArn(data.principalArn || data.resourceArn)) 
-    && suspendedUsers.includes(data.userName || extractUserFromArn(data.principalArn || data.resourceArn));
+  const parsedUserName = data.userName || extractUserFromArn(data.principalArn || data.resourceArn || '');
+  const isUserSuspended = parsedUserName && suspendedUsers.some(u => 
+    u.userName === parsedUserName && (!u.suspendUntil || new Date(u.suspendUntil) > new Date())
+  );
   const isRemediated  = data.id && remediatedAnomalies.includes(data.id);
 
-  const targetUser = data.userName || extractUserFromArn(data.principalArn || data.resourceArn || '');
+  const targetUser = parsedUserName;
 
   // ── handlers ──────────────────────────────────────────────────────────────
 
@@ -101,14 +105,16 @@ export const EventDrawer: React.FC = () => {
     }
   };
 
-  const handleToggleSuspendUser = () => {
+  const handleToggleSuspendUser = (durationHours: number | null = null) => {
     if (!targetUser) return;
     if (isUserSuspended) {
       unsuspendIamUser(targetUser);
       flash(`✅ IAM user "${targetUser}" restored`);
+      setShowSuspendMenu(false);
     } else {
-      suspendIamUser(targetUser);
-      flash(`🔒 IAM user "${targetUser}" suspended`);
+      suspendIamUser(targetUser, durationHours);
+      flash(`🔒 IAM user "${targetUser}" suspended${durationHours ? ` for ${durationHours}h` : ''}`);
+      setShowSuspendMenu(false);
     }
   };
 
@@ -124,20 +130,26 @@ export const EventDrawer: React.FC = () => {
     setIsAiLoading(true);
     setAiReport(null);
     setTimeout(() => {
-      let analysis = '';
-      if (type === 'log' && data.eventName === 'ConsoleLogin') {
-        analysis = `### 🚨 ROOT LOG-IN ANALYSIS\n\n**Incident Severity**: CRITICAL\n\n**Findings**:\n- Root account logged in from IP **${data.sourceIP}** without MFA.\n\n**Recommended Actions**:\n1. Block source IP immediately.\n2. Revoke the active session via IAM Console.\n3. Enable Virtual or Hardware MFA on Root account.\n4. Implement SCP to deny root access globally.`;
-      } else if (type === 's3') {
-        analysis = `### 📂 S3 BUCKET EXPOSURE REPORT\n\n**Incident Severity**: ${data.severity}\n\n**Findings**:\n- Public access blocks disabled. Policy allows open "Principal: *".\n\n**Recommended Actions**:\n1. Apply strict S3 Public Access Blocks.\n2. Restrict Bucket Policy to trusted IAM roles or VPC endpoints.`;
-      } else if (type === 'iam' && data.pattern === 'passrole_privesc') {
-        analysis = `### 🛡️ PRIVILEGE ESCALATION DETECTED\n\n**Incident Severity**: CRITICAL\n\n**Findings**:\n- Caller invoked iam:PassRole and launched a Lambda within 5 min.\n- Allows a restricted role to execute code using an Admin-level Service Role.\n\n**Recommended Actions**:\n1. Restrict iam:PassRole via resources-based limits.\n2. Suspend the associated IAM identity immediately.\n3. Review Lambda function code for backdoor payloads.`;
-      } else {
-        analysis = `### 🔍 SECURITY ANOMALY REPORT\n\n**Incident Severity**: ${data.severity || 'HIGH'}\n\n**Context**: ${data.description || data.title || 'Generic Event'}\n\n**Findings**:\n- Log source from **${data.sourceIP || 'N/A'}** targeting **${data.destination || 'N/A'}**.\n\n**Recommended Actions**:\n1. Block source IP in security groups.\n2. Revoke associated temporary credentials.\n3. Audit CloudTrail calls in nearby temporal windows.`;
-      }
-      setAiReport(analysis);
+      const prompt = `Please act as a Senior Cloud Security Engineer. I need you to analyze this AWS security event and provide a risk assessment, potential blast radius, and step-by-step remediation commands.
+
+Here is the context:
+- Event Type: ${type.toUpperCase()}
+- Event Name: ${data.eventName || data.title || 'N/A'}
+- Severity: ${data.severity || 'LOW'}
+- Target Resource: ${data.principalArn || data.resourceArn || 'N/A'}
+- Source IP: ${data.sourceIP || 'N/A'}
+- Timestamp: ${data.timestamp || data.eventTime || new Date().toISOString()}
+- Threat Context: ${data.detail || data.description || data.message || 'N/A'}
+
+Raw Event Payload:
+\`\`\`json
+${rawJson}
+\`\`\`
+`;
+      setAiReport(prompt);
       setIsAiLoading(false);
-      addRemediationLog('AI_INVESTIGATE', data.eventName || data.title || data.id || 'event', 'SUCCESS');
-    }, 1200);
+      addRemediationLog('GENERATE_AI_CONTEXT', data.eventName || data.title || data.id || 'event', 'SUCCESS');
+    }, 600);
   };
 
   // ── Incident Report ───────────────────────────────────────────────────────
@@ -257,7 +269,13 @@ ${rawJson}
       sublabel: targetUser || 'No user identified',
       active: isUserSuspended,
       disabled: !targetUser,
-      onClick: handleToggleSuspendUser,
+      onClick: () => {
+        if (isUserSuspended) {
+          handleToggleSuspendUser(null);
+        } else {
+          setShowSuspendMenu(!showSuspendMenu);
+        }
+      },
       activeColor: 'border-orange-500/40 bg-orange-500/5 text-orange-600 dark:text-orange-400',
       inactiveColor: 'border-gray-200 dark:border-gray-700 hover:border-orange-400/50 hover:bg-orange-500/5',
     },
@@ -376,25 +394,61 @@ ${rawJson}
             {showCountermeasures && (
               <div className="p-3 grid grid-cols-2 gap-2">
                 {countermeasures.map((cm) => (
-                  <button
-                    key={cm.id}
-                    onClick={cm.onClick}
-                    disabled={cm.disabled}
-                    title={cm.disabled ? 'Not available for this event' : undefined}
-                    className={`flex flex-col items-start gap-1.5 p-3 rounded-lg border text-left transition-all ${
-                      cm.disabled
-                        ? 'opacity-30 cursor-not-allowed border-gray-200 dark:border-gray-800'
-                        : cm.active
-                        ? cm.activeColor
-                        : `text-gray-600 dark:text-gray-300 ${cm.inactiveColor}`
-                    }`}
-                  >
-                    <div className="flex items-center gap-1.5 font-bold text-[11px]">
-                      {cm.icon}
-                      {cm.label}
-                    </div>
-                    <div className="text-[9px] font-mono opacity-70 truncate w-full">{cm.sublabel}</div>
-                  </button>
+                  <React.Fragment key={cm.id}>
+                    <button
+                      onClick={cm.onClick}
+                      disabled={cm.disabled}
+                      title={cm.disabled ? 'Not available for this event' : undefined}
+                      className={`flex flex-col items-start gap-1.5 p-3 rounded-lg border text-left transition-all ${
+                        cm.disabled
+                          ? 'opacity-30 cursor-not-allowed border-gray-200 dark:border-gray-800'
+                          : cm.active
+                          ? cm.activeColor
+                          : `text-gray-600 dark:text-gray-300 ${cm.inactiveColor}`
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5 font-bold text-[11px]">
+                        {cm.icon}
+                        {cm.label}
+                      </div>
+                      <div className="text-[9px] font-mono opacity-70 truncate w-full">{cm.sublabel}</div>
+                    </button>
+                    {cm.id === 'suspend-user' && showSuspendMenu && !isUserSuspended && (
+                      <div className="col-span-2 bg-gray-100/50 dark:bg-[#0E1524]/80 border border-gray-200 dark:border-gray-800 p-3 rounded-lg mt-1 flex flex-col gap-2">
+                        <span className="text-[10px] font-bold text-gray-500 w-full">Select Suspension Duration:</span>
+                        <div className="flex flex-wrap gap-2">
+                          <button onClick={() => handleToggleSuspendUser(12)} className="text-[10px] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 px-3 py-1.5 rounded hover:bg-orange-50 dark:hover:bg-orange-900/30 transition font-bold">12 Hours</button>
+                          <button onClick={() => handleToggleSuspendUser(24)} className="text-[10px] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 px-3 py-1.5 rounded hover:bg-orange-50 dark:hover:bg-orange-900/30 transition font-bold">24 Hours</button>
+                          <button onClick={() => handleToggleSuspendUser(36)} className="text-[10px] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 px-3 py-1.5 rounded hover:bg-orange-50 dark:hover:bg-orange-900/30 transition font-bold">36 Hours</button>
+                          <button onClick={() => handleToggleSuspendUser(null)} className="text-[10px] bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 px-3 py-1.5 rounded hover:bg-red-50 dark:hover:bg-red-900/30 transition font-bold text-red-600 dark:text-red-400">Indefinite</button>
+                        </div>
+                        
+                        <div className="w-full flex items-center justify-between gap-4 mt-1 pt-3 border-t border-gray-200/60 dark:border-gray-700/60">
+                          <div className="flex flex-col flex-1 gap-1.5">
+                            <div className="flex justify-between items-center text-[10px] text-gray-500 font-bold">
+                              <span>Custom Limit</span>
+                              <span className="text-gray-900 dark:text-gray-200 bg-white dark:bg-gray-800 px-1.5 py-0.5 rounded border border-gray-200 dark:border-gray-700">{customSuspendHours} hrs</span>
+                            </div>
+                            <input 
+                              type="range" 
+                              min="1" 
+                              max="168" 
+                              step="1" 
+                              value={customSuspendHours} 
+                              onChange={(e) => setCustomSuspendHours(e.target.value)} 
+                              className="w-full accent-orange-500 h-1 bg-gray-200 rounded-lg appearance-none cursor-pointer dark:bg-gray-700 outline-none" 
+                            />
+                          </div>
+                          <button 
+                            onClick={() => handleToggleSuspendUser(parseInt(customSuspendHours) || 48)} 
+                            className="text-[10px] bg-orange-100 dark:bg-orange-900/40 text-orange-700 dark:text-orange-400 px-4 py-2 font-bold border border-orange-200 dark:border-orange-800/50 rounded-lg hover:bg-orange-200 dark:hover:bg-orange-900/60 transition shrink-0"
+                          >
+                            Apply
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </React.Fragment>
                 ))}
               </div>
             )}
@@ -413,7 +467,7 @@ ${rawJson}
                   disabled={isAiLoading}
                   className="text-xs bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-600/50 text-white font-semibold px-3 py-1.5 rounded-lg shadow-sm flex items-center gap-1.5 transition"
                 >
-                  {isAiLoading ? 'Analyzing...' : 'Investigate with AI ↗'}
+                  {isAiLoading ? 'Compiling context...' : 'Generate AI Context ↗'}
                 </button>
               )}
             </div>
@@ -421,19 +475,34 @@ ${rawJson}
             {isAiLoading && (
               <div className="flex flex-col items-center justify-center py-6 space-y-2">
                 <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-                <span className="text-xs text-gray-500">Deconstructing CloudTrail trace logs...</span>
+                <span className="text-xs text-gray-500">Compiling event context...</span>
               </div>
             )}
 
             {aiReport && (
-              <div className="bg-white dark:bg-[#131E33] border border-gray-100 dark:border-gray-800/80 rounded-lg p-3 space-y-2">
-                <div className="prose prose-xs dark:prose-invert">{renderMarkdown(aiReport)}</div>
-                <div className="flex justify-end pt-2">
+              <div className="bg-white dark:bg-[#131E33] border border-indigo-100 dark:border-indigo-500/30 rounded-lg p-3 space-y-2">
+                <div className="flex justify-between items-center mb-1">
+                  <span className="text-[10px] font-bold text-indigo-500">AI Prompt Context</span>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(aiReport);
+                      flash('✅ AI Prompt Copied!');
+                    }}
+                    className="flex items-center gap-1 text-[10px] font-bold text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 dark:hover:text-indigo-300 transition"
+                  >
+                    <Copy className="w-3 h-3" />
+                    Copy Prompt
+                  </button>
+                </div>
+                <pre className="text-[10px] font-mono text-gray-700 dark:text-gray-300 whitespace-pre-wrap bg-gray-50 dark:bg-gray-900/50 p-2.5 rounded border border-gray-100 dark:border-gray-800 max-h-[200px] overflow-y-auto select-all">
+                  {aiReport}
+                </pre>
+                <div className="flex justify-end pt-1">
                   <button
                     onClick={() => setAiReport(null)}
-                    className="text-[10px] text-gray-500 hover:text-gray-900 dark:hover:text-white"
+                    className="text-[10px] text-gray-500 hover:text-gray-900 dark:hover:text-white transition"
                   >
-                    Clear Analysis
+                    Clear
                   </button>
                 </div>
               </div>

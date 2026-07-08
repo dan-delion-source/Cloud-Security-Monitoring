@@ -8,7 +8,7 @@ import {
 
 export const Settings: React.FC = () => {
   const {
-    awsConfig, isMockMode, updateAwsConfig, toggleMockMode, resetStore,
+    awsConfig, isMockMode, autoRemediate, updateAwsConfig, toggleMockMode, toggleAutoRemediate, resetStore,
     blockedIps, mutedEvents, suspendedUsers,
     unblockIpAddress, unmuteEventName, unsuspendIamUser,
     remediationLogs,
@@ -69,6 +69,32 @@ export const Settings: React.FC = () => {
           </span>
         </div>
 
+        {/* Auto-Remediation Toggle */}
+        <div className="p-3.5 bg-gray-50 dark:bg-[#121B2F]/30 border border-red-500/10 dark:border-red-500/20 rounded-xl space-y-2 mt-2 mb-4">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-gray-900 dark:text-gray-100 uppercase tracking-wide flex items-center gap-2">
+              <ShieldBan className="w-4 h-4 text-orange-500" />
+              Auto-Remediation (High/Critical)
+            </span>
+            <button
+              type="button"
+              onClick={() => toggleAutoRemediate()}
+              className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-250 ease-in-out focus:outline-none ${
+                autoRemediate ? 'bg-orange-500' : 'bg-gray-300 dark:bg-slate-700'
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-250 ease-in-out ${
+                  autoRemediate ? 'translate-x-5' : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </div>
+          <p className="text-[10px] text-gray-500 dark:text-gray-400 leading-normal pl-6">
+            When enabled, CloudSentinel will automatically block source IPs, suspend IAM users, and remediate buckets as soon as a CRITICAL or HIGH severity event is detected.
+          </p>
+        </div>
+
         {/* Blocked IPs */}
         <RuleSection
           icon={<ShieldBan className="w-4 h-4 text-red-500" />}
@@ -94,9 +120,15 @@ export const Settings: React.FC = () => {
           icon={<UserX className="w-4 h-4 text-orange-500" />}
           title="Suspended IAM Users"
           emptyText="No IAM users currently suspended"
-          items={suspendedUsers}
+          items={suspendedUsers.map(u => {
+            if (!u.suspendUntil) return `${u.userName} (Indefinite)`;
+            return `${u.userName} (Until ${new Date(u.suspendUntil).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})})`;
+          })}
           color="orange"
-          onRemove={unsuspendIamUser}
+          onRemove={(formattedString) => {
+            const userName = formattedString.split(' ')[0];
+            unsuspendIamUser(userName);
+          }}
         />
       </div>
 

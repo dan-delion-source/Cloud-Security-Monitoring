@@ -36,7 +36,7 @@ interface SecurityState {
   // Firewall / Remediation State
   blockedIps: string[];
   mutedEvents: string[];
-  suspendedUsers: string[];
+  suspendedUsers: Array<{ userName: string; suspendUntil: string | null }>;
   remediatedAnomalies: string[];
   remediationLogs: Array<{ id: string; timestamp: string; action: string; target: string; status: 'SUCCESS' | 'FAILED' }>;
 
@@ -47,6 +47,7 @@ interface SecurityState {
     region: string;
   };
   isMockMode: boolean;
+  autoRemediate: boolean;
 
   // UI States
   isLoading: boolean;
@@ -82,7 +83,7 @@ interface SecurityState {
   unblockIpAddress: (ip: string) => void;
   muteEventName: (eventName: string) => void;
   unmuteEventName: (eventName: string) => void;
-  suspendIamUser: (userName: string) => void;
+  suspendIamUser: (userName: string, durationHours?: number | null) => void;
   unsuspendIamUser: (userName: string) => void;
   remediateAnomaly: (anomalyId: string) => void;
   addRemediationLog: (action: string, target: string, status: 'SUCCESS' | 'FAILED') => void;
@@ -90,12 +91,13 @@ interface SecurityState {
   // Connector actions
   updateAwsConfig: (config: { accessKeyId: string; secretAccessKey: string; region: string }) => void;
   toggleMockMode: () => void;
+  toggleAutoRemediate: () => void;
   triggerScan: () => void;
   resetStore: () => void;
   resetAll: () => void;
 }
 
-export const useSecurityStore = create<SecurityState>((set) => ({
+export const useSecurityStore = create<SecurityState>((set, get) => ({
   logs: [],
   unauthorizedEvents: [],
   buckets: [],
@@ -114,6 +116,7 @@ export const useSecurityStore = create<SecurityState>((set) => ({
     region: 'us-east-1'
   },
   isMockMode: true, // Sandbox mode active by default
+  autoRemediate: false, // Don't auto-remediate by default for safety
 
   isLoading: false,
   isScanning: false,
@@ -126,24 +129,52 @@ export const useSecurityStore = create<SecurityState>((set) => ({
   scanTriggerCount: 0,
   
   setLogs: (logs) => set({ logs }),
-  prependLogs: (newLogs) => set((state) => {
-    // Prevent duplicates
-    const existingIds = new Set(state.logs.map(l => l.id));
-    const uniqueNewLogs = newLogs
-      .filter(l => !existingIds.has(l.id))
-      .map(l => ({ ...l, isNew: true } as ParsedLog));
+  prependLogs: (newLogs) => {
+    set((state) => {
+      // Prevent duplicates
+      const existingIds = new Set(state.logs.map(l => l.id));
+      const uniqueNewLogs = newLogs
+        .filter(l => !existingIds.has(l.id))
+        .map(l => ({ ...l, isNew: true } as ParsedLog));
+        
+      // Set isNew to false on old logs
+      const updatedOldLogs = state.logs.map(l => ({ ...l, isNew: false } as ParsedLog));
       
-    // Set isNew to false on old logs
-    const updatedOldLogs = state.logs.map(l => ({ ...l, isNew: false } as ParsedLog));
-    
-    // Concat and limit to 1000 logs
-    const allLogs = [...uniqueNewLogs, ...updatedOldLogs].slice(0, 1000);
-    return { logs: allLogs };
-  }),
+      // Concat and limit to 1000 logs
+      const allLogs = [...uniqueNewLogs, ...updatedOldLogs].slice(0, 1000);
+      return { logs: allLogs };
+    });
+
+    if (get().autoRemediate) {
+      newLogs.forEach(log => {
+        if ((log.severity === 'HIGH' || log.severity === 'CRITICAL') && log.sourceIP) {
+          get().blockIpAddress(log.sourceIP);
+        }
+      });
+    }
+  },
   
-  setUnauthorizedEvents: (unauthorizedEvents) => set({ unauthorizedEvents }),
+  setUnauthorizedEvents: (unauthorizedEvents) => {
+    set({ unauthorizedEvents });
+    if (get().autoRemediate) {
+      unauthorizedEvents.forEach(event => {
+        if ((event.severity === 'HIGH' || event.severity === 'CRITICAL') && event.sourceIP) {
+          get().blockIpAddress(event.sourceIP);
+        }
+      });
+    }
+  },
   
-  setBuckets: (buckets) => set({ buckets }),
+  setBuckets: (buckets) => {
+    set({ buckets });
+    if (get().autoRemediate) {
+      buckets.forEach(bucket => {
+        if (bucket.severity === 'HIGH' || bucket.severity === 'CRITICAL') {
+          get().remediateBucket(bucket.id);
+        }
+      });
+    }
+  },
   
   remediateBucket: (bucketId) => set((state) => ({
     buckets: state.buckets.map(b => 
@@ -167,7 +198,23 @@ export const useSecurityStore = create<SecurityState>((set) => ({
     )
   })),
   
-  setIamAnomalies: (iamAnomalies) => set({ iamAnomalies }),
+  setIamAnomalies: (iamAnomalies) => {
+    set({ iamAnomalies });
+    if (get().autoRemediate) {
+      iamAnomalies.forEach(anomaly => {
+        if (anomaly.severity === 'HIGH' || anomaly.severity === 'CRITICAL') {
+          get().remediateAnomaly(anomaly.id);
+          // Attempt to extract username for suspension if it's an IAM user ARN
+          if (anomaly.resourceArn && anomaly.resourceArn.includes(':user/')) {
+            const parts = anomaly.resourceArn.split(':user/');
+            if (parts.length > 1) {
+              get().suspendIamUser(parts[1], null);
+            }
+          }
+        }
+      });
+    }
+  },
   
   setActiveAlerts: (activeAlerts) => set({ activeAlerts }),
   
@@ -255,20 +302,34 @@ export const useSecurityStore = create<SecurityState>((set) => ({
     };
   }),
 
-  suspendIamUser: (userName) => set((state) => {
-    if (state.suspendedUsers.includes(userName)) return {};
+  suspendIamUser: (userName, durationHours = null) => set((state) => {
+    const existing = state.suspendedUsers.find(u => u.userName === userName);
+    if (existing && (!existing.suspendUntil || new Date(existing.suspendUntil) > new Date())) {
+      return {};
+    }
+
+    let suspendUntil = null;
+    if (durationHours !== null) {
+      const d = new Date();
+      d.setHours(d.getHours() + durationHours);
+      suspendUntil = d.toISOString();
+    }
+
     const newLogs = [
       {
         id: `remedy-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         timestamp: new Date().toISOString(),
         action: 'SUSPEND_IAM_USER',
-        target: userName,
+        target: userName + (durationHours ? ` (${durationHours}h)` : ' (Indefinite)'),
         status: 'SUCCESS' as const
       },
       ...state.remediationLogs
     ];
+    
+    const filtered = state.suspendedUsers.filter(u => u.userName !== userName);
+
     return {
-      suspendedUsers: [...state.suspendedUsers, userName],
+      suspendedUsers: [...filtered, { userName, suspendUntil }],
       remediationLogs: newLogs
     };
   }),
@@ -285,7 +346,7 @@ export const useSecurityStore = create<SecurityState>((set) => ({
       ...state.remediationLogs
     ];
     return {
-      suspendedUsers: state.suspendedUsers.filter(item => item !== userName),
+      suspendedUsers: state.suspendedUsers.filter(item => item.userName !== userName),
       remediationLogs: newLogs
     };
   }),
@@ -335,6 +396,7 @@ export const useSecurityStore = create<SecurityState>((set) => ({
       activeAlerts: [],
     };
   }),
+  toggleAutoRemediate: () => set((state) => ({ autoRemediate: !state.autoRemediate })),
   
   triggerScan: () => {
     // Self-healing timeout: automatically reset isScanning state to false after 2 seconds

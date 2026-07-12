@@ -196,12 +196,9 @@ async function main() {
       }
 
       // Add required dependencies
-      const deps = ['resend', 'postal-mime', 'standardwebhooks'];
-      for (const dep of deps) {
-        const depPath = path.join(__dirname, `../node_modules/${dep}`);
-        if (fs.existsSync(depPath)) {
-          zip.addLocalFolder(depPath, `node_modules/${dep}`);
-        }
+      const nodeModulesPath = path.join(__dirname, '../node_modules');
+      if (fs.existsSync(nodeModulesPath)) {
+        zip.addLocalFolder(nodeModulesPath, 'node_modules');
       }
 
       const zipBuffer = zip.toBuffer();

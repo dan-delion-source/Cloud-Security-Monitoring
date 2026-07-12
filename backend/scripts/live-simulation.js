@@ -3,6 +3,7 @@ const { IAMClient, CreateUserCommand, AttachUserPolicyCommand, CreateVirtualMFAD
 const { SNSClient, ListTopicsCommand, PublishCommand } = require('@aws-sdk/client-sns');
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
 const { DynamoDBClient, ScanCommand, DeleteItemCommand } = require('@aws-sdk/client-dynamodb');
+const { sendCriticalAlert } = require('../middleware/emailNotifier');
 
 const ENDPOINT = 'http://localhost:4566';
 const REGION = 'us-east-1';
@@ -292,6 +293,27 @@ async function main() {
 
   await invokeScanners();
   console.log('⚡ Dashboard action: A new public Read ACL violation is registered!');
+  console.log('🕒 Waiting 6 seconds before triggering next threat event...');
+  await delay(6000);
+
+  // --- STAGE 9 ---
+  console.log('\n🚨 [STAGE 9] Direct Email Notification Test!');
+  try {
+    const testAlert = {
+      alertId:   `live-test-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      type:      'DIRECT_EMAIL_TEST',
+      severity:  'CRITICAL',
+      resource:  'live-simulation-script',
+      detail:    'This is a direct test of the email notification system from the live simulation script.',
+      status:    'OPEN'
+    };
+    await sendCriticalAlert(testAlert);
+    console.log('[✓] Dispatched test alert email via Resend.');
+  } catch (e) {
+    console.error('[✗] Failed to send test alert email:', e);
+  }
+
   console.log('\n==================================================');
   console.log('  🏁 [✓] Live Delayed Stream Simulation Completed!');
   console.log('==================================================');

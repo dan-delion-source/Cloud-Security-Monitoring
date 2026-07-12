@@ -9,6 +9,9 @@ const path = require('path');
 const http = require('http');
 const { execSync } = require('child_process');
 
+// Load environment variables from .env
+require('dotenv').config();
+
 const ENDPOINT = 'http://localhost:4566';
 const REGION = 'us-east-1';
 
@@ -185,6 +188,22 @@ async function main() {
       const zip = new AdmZip();
       const codePath = path.join(__dirname, '../lambdas', `${lambdaName}.js`);
       zip.addLocalFile(codePath);
+
+      // Add critical alert notification middleware
+      const notifierPath = path.join(__dirname, '../middleware/emailNotifier.js');
+      if (fs.existsSync(notifierPath)) {
+        zip.addLocalFile(notifierPath, 'middleware');
+      }
+
+      // Add required dependencies
+      const deps = ['resend', 'postal-mime', 'standardwebhooks'];
+      for (const dep of deps) {
+        const depPath = path.join(__dirname, `../node_modules/${dep}`);
+        if (fs.existsSync(depPath)) {
+          zip.addLocalFolder(depPath, `node_modules/${dep}`);
+        }
+      }
+
       const zipBuffer = zip.toBuffer();
 
       // Check if function exists
@@ -207,7 +226,10 @@ async function main() {
         Timeout: 15,
         Environment: {
           Variables: {
-            AWS_ENDPOINT_URL: LAMBDA_ENDPOINT
+            AWS_ENDPOINT_URL: LAMBDA_ENDPOINT,
+            RESEND_API_KEY: process.env.RESEND_API_KEY || '',
+            ALERT_EMAIL_FROM: process.env.ALERT_EMAIL_FROM || '',
+            ALERT_EMAIL_TO: process.env.ALERT_EMAIL_TO || ''
           }
         }
       }));

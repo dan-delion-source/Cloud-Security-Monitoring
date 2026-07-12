@@ -2,6 +2,7 @@ const { S3Client, ListBucketsCommand, GetBucketAclCommand, GetBucketPolicyComman
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand } = require('@aws-sdk/lib-dynamodb');
 const crypto = require('crypto');
+const { sendCriticalAlert } = require('../middleware/emailNotifier');
 
 const region = process.env.AWS_REGION || 'us-east-1';
 const endpoint = process.env.AWS_ENDPOINT_URL || 'http://localhost:4566';
@@ -84,7 +85,7 @@ exports.handler = async (event) => {
           TableName: 'SecurityAlerts',
           Item: alert
         }));
-        
+        await sendCriticalAlert(alert);
         console.log(`[ALERT] Logged public bucket finding for ${bucketName}`);
       }
     }

@@ -9,7 +9,7 @@ export const IamMisuse: React.FC = () => {
   // Activate IAM anomaly check hook, extracting liveUsers from LocalStack
   const { liveUsers } = useIamReport();
 
-  const { iamAnomalies, unsuspendIamUser } = useSecurityStore();
+  const { iamAnomalies, unsuspendIamUser, setSelectedEvent } = useSecurityStore();
 
   return (
     <div className="space-y-4">
@@ -23,7 +23,7 @@ export const IamMisuse: React.FC = () => {
                 Live IAM Identity Inventory
               </h3>
               <span className="text-[9px] text-gray-400 font-mono mt-0.5 block">
-                Real-time security auditing of active LocalStack IAM users
+                Real-time security auditing of active LocalStack IAM users (Click card to view details)
               </span>
             </div>
           </div>
@@ -37,7 +37,31 @@ export const IamMisuse: React.FC = () => {
           {liveUsers.map((user) => (
             <div 
               key={user.userName}
-              className={`p-4 border rounded-xl bg-gray-50/30 dark:bg-[#121B2F]/20 flex flex-col justify-between space-y-3.5 transition-all hover:shadow-md ${
+              onClick={() => {
+                // Find matching anomaly in iamAnomalies
+                const anomaly = iamAnomalies.find(a => a.resourceArn?.includes(user.userName) || a.detail?.includes(user.userName));
+                if (anomaly) {
+                  setSelectedEvent({ type: 'iam', data: anomaly as any });
+                } else {
+                  // Fallback: create a custom pseudo-finding for compliant/suspended user
+                  setSelectedEvent({
+                    type: 'iam',
+                    data: {
+                      id: `iam-user-${user.userName}`,
+                      severity: user.complianceStatus === 'SUSPENDED' ? 'HIGH' : 'LOW',
+                      title: `IAM User Status: ${user.userName}`,
+                      detail: `IAM user account is currently ${user.complianceStatus}. MFA Active: ${user.mfaActive ? 'Yes' : 'No'}. Policies: ${user.attachedPolicies.join(', ') || 'None'}.`,
+                      actionText: user.complianceStatus === 'SUSPENDED' ? 'Restore User' : 'Compliant',
+                      pattern: 'user_inventory',
+                      timestamp: user.createDate || new Date().toISOString(),
+                      resourceArn: user.arn,
+                      userName: user.userName,
+                      rawJson: JSON.stringify(user, null, 2)
+                    }
+                  });
+                }
+              }}
+              className={`p-4 border rounded-xl bg-gray-50/30 dark:bg-[#121B2F]/20 flex flex-col justify-between space-y-3.5 transition-all hover:shadow-md cursor-pointer hover:border-gray-300 dark:hover:border-gray-700/80 ${
                 user.complianceStatus === 'SUSPENDED'
                   ? 'border-amber-500/20 hover:border-amber-500/30 bg-amber-500/[0.02]'
                   : user.complianceStatus === 'NON_COMPLIANT'
@@ -75,7 +99,10 @@ export const IamMisuse: React.FC = () => {
                 </div>
                 {user.complianceStatus === 'SUSPENDED' && (
                   <button
-                    onClick={() => unsuspendIamUser(user.userName)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      unsuspendIamUser(user.userName);
+                    }}
                     className="px-2 py-0.5 text-[8px] font-bold text-emerald-600 border border-emerald-500/20 hover:bg-emerald-500/10 rounded transition shrink-0"
                   >
                     Restore

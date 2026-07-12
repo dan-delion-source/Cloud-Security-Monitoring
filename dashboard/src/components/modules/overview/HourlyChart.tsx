@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo, useEffect, useState } from 'react';
 import {
   BarChart,
   Bar,
@@ -9,6 +9,7 @@ import {
   ResponsiveContainer
 } from 'recharts';
 import { BarChart3 } from 'lucide-react';
+import { useSecurityStore } from '../../../store/securityStore';
 
 interface HourlyData {
   hour: string;
@@ -18,44 +19,71 @@ interface HourlyData {
 }
 
 export const HourlyChart: React.FC = () => {
-  // Generate a trailing 12-hour list from current UTC hour
-  const generateHourlyData = (): HourlyData[] => {
-    const data: HourlyData[] = [];
-    const currentHour = new Date().getUTCHours();
-    
-    // Fixed pre-simulated logs spread over trailing 12 hours for beautiful rendering
-    const patterns = [
-      { c: 0, h: 1, m: 2 },
-      { c: 0, h: 0, m: 1 },
-      { c: 1, h: 0, m: 0 },
-      { c: 0, h: 2, m: 3 },
-      { c: 0, h: 1, m: 1 },
-      { c: 0, h: 0, m: 2 },
-      { c: 1, h: 1, m: 0 },
-      { c: 0, h: 0, m: 1 },
-      { c: 2, h: 1, m: 4 },
-      { c: 0, h: 2, m: 2 },
-      { c: 1, h: 0, m: 1 },
-      { c: 0, h: 1, m: 3 },
-    ];
+  const { logs, unauthorizedEvents, buckets, iamAnomalies } = useSecurityStore();
 
+  // Tick counter to force re-render every 60s so the time axis shifts
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setTick(t => t + 1), 60_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const chartData = useMemo(() => {
+    const now = new Date();
+    const currentHourUTC = now.getUTCHours();
+
+    // Build 12 hourly buckets keyed by UTC hour
+    const bucketMap = new Map<number, { Critical: number; High: number; Medium: number }>();
     for (let i = 11; i >= 0; i--) {
-      const h = (currentHour - i + 24) % 24;
-      const formattedHour = `${String(h).padStart(2, '0')}:00`;
-      const pattern = patterns[11 - i];
-      
+      const h = (currentHourUTC - i + 24) % 24;
+      bucketMap.set(h, { Critical: 0, High: 0, Medium: 0 });
+    }
+
+    // 12 hours ago as cutoff
+    const cutoff = new Date(now.getTime() - 12 * 60 * 60 * 1000);
+
+    // Helper: place a timestamped event with a severity into the correct bucket
+    const place = (timestamp: string, severity: string) => {
+      const d = new Date(timestamp);
+      if (d < cutoff || d > now) return;
+      const h = d.getUTCHours();
+      const bucket = bucketMap.get(h);
+      if (!bucket) return;
+      const sev = severity?.toUpperCase();
+      if (sev === 'CRITICAL') bucket.Critical++;
+      else if (sev === 'HIGH') bucket.High++;
+      else if (sev === 'MEDIUM') bucket.Medium++;
+      // LOW events are intentionally excluded from the chart
+    };
+
+    // Feed all event sources into buckets
+    logs.forEach(l => place(l.timestamp, l.severity));
+    unauthorizedEvents.forEach(e => place(e.timestamp, e.severity));
+    iamAnomalies.forEach(a => place(a.timestamp, a.severity));
+    buckets
+      .filter(b => !b.remediated)
+      .forEach(b => {
+        // S3 buckets use creationDate (Date object), fallback to current time
+        const ts = b.creationDate ? b.creationDate.toISOString() : now.toISOString();
+        place(ts, b.severity);
+      });
+
+    // Convert map to ordered array
+    const data: HourlyData[] = [];
+    for (let i = 11; i >= 0; i--) {
+      const h = (currentHourUTC - i + 24) % 24;
+      const entry = bucketMap.get(h)!;
       data.push({
-        hour: formattedHour,
-        Critical: pattern.c,
-        High: pattern.h,
-        Medium: pattern.m
+        hour: `${String(h).padStart(2, '0')}:00`,
+        Critical: entry.Critical,
+        High: entry.High,
+        Medium: entry.Medium
       });
     }
 
     return data;
-  };
-
-  const chartData = generateHourlyData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [logs, unauthorizedEvents, buckets, iamAnomalies, tick]);
 
   return (
     <div className="glass-card p-4 flex flex-col h-[320px] select-none">
@@ -67,7 +95,7 @@ export const HourlyChart: React.FC = () => {
           Hourly Event Distribution (12h)
         </h3>
         <span className="text-[10px] text-gray-400 font-mono">
-          Last 12 hours UTC
+          Last 12 hours UTC · Live
         </span>
       </div>
 
